@@ -1352,6 +1352,12 @@ button {
   color: var(--accent-dark);
 }
 
+@media screen {
+  .print-area {
+    display: none;
+  }
+}
+
 @media print {
   body * {
     visibility: hidden;
@@ -1364,5 +1370,6 @@ button {
     left: 0;
     top: 0;
     width: 100%;
+    display: block !important;
   }
 }

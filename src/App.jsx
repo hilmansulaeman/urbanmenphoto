@@ -9,6 +9,7 @@ import LiveWallView from './components/LiveWallView.jsx';
 import ThankYouScreen from './components/ThankYouScreen.jsx';
 import FilterPanel from './components/FilterPanel.jsx';
 import { FILTERS } from './utils/photoConfig.js';
+import MobileGalleryView from './components/MobileGalleryView.jsx';
 
 const STEPS = {
   IDLE: 'IDLE',
@@ -23,6 +24,14 @@ const STEPS = {
 };
 
 export default function App() {
+  // Simple router for client gallery
+  const isGalleryRoute = window.location.pathname.startsWith('/gallery/');
+  const sessionId = isGalleryRoute ? window.location.pathname.split('/gallery/')[1] : null;
+
+  if (isGalleryRoute && sessionId) {
+    return <MobileGalleryView sessionId={sessionId} />;
+  }
+
   const [currentStep, setCurrentStep] = useState(STEPS.IDLE);
 
   const [orderDetails, setOrderDetails] = useState({
@@ -63,7 +72,16 @@ export default function App() {
   const renderStep = () => {
     switch (currentStep) {
       case STEPS.IDLE:
-        return <LandingPage onStart={() => setCurrentStep(STEPS.PACKAGE_TIER)} />;
+        return <LandingPage onStart={() => {
+          setOrderDetails(prev => ({ 
+            ...prev, 
+            tier: { id: 'basic', name: 'Basic Session', poseLimit: 20, printLimit: 1, price: 35000 }, 
+            headCount: null,
+            basePrice: 35000,
+            totalPrice: 35000
+          }));
+          setCurrentStep(STEPS.PAYMENT_1);
+        }} />;
 
       case STEPS.PACKAGE_TIER:
         return (
@@ -91,10 +109,11 @@ export default function App() {
       case STEPS.PAYMENT_1:
         return (
           <PaymentView
-            title="Selesaikan Pembayaran"
+            title="Mulai Sesi Photobooth"
             orderDetails={orderDetails}
             onPaymentSuccess={() => setCurrentStep(STEPS.CAMERA)}
-            onBack={() => setCurrentStep(STEPS.HEADCOUNT)}
+            onBack={() => setCurrentStep(STEPS.IDLE)}
+            showFeatures={true}
           />
         );
 
@@ -164,7 +183,7 @@ export default function App() {
           <LiveWallView
             orderDetails={orderDetails}
             upsellDetails={upsellDetails}
-            selectedPhotos={selectedPhotos}
+            capturedPhotos={capturedPhotos}
             onNext={() => setCurrentStep(STEPS.THANK_YOU)}
           />
         );
@@ -173,7 +192,16 @@ export default function App() {
         return <ThankYouScreen onReset={resetApp} />;
 
       default:
-        return <LandingPage onStart={() => setCurrentStep(STEPS.PACKAGE_TIER)} />;
+        return <LandingPage onStart={() => {
+          setOrderDetails(prev => ({ 
+            ...prev, 
+            tier: { id: 'basic', name: 'Basic Session', poseLimit: 20, printLimit: 1, price: 35000 }, 
+            headCount: null,
+            basePrice: 35000,
+            totalPrice: 35000
+          }));
+          setCurrentStep(STEPS.PAYMENT_1);
+        }} />;
     }
   };
 

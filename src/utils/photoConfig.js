@@ -246,6 +246,70 @@ export async function composePhotoCard({ photos, filterId, frameId, modeId, mime
   return canvas.toDataURL(mimeType, 0.95);
 }
 
+export function drawFrame(ctx, frameId, width, height) {
+  const frame = FRAMES.find((item) => item.id === frameId) ?? FRAMES[0];
+  const border = Math.max(22, Math.round(Math.min(width, height) * 0.045));
+
+  ctx.save();
+  ctx.lineWidth = border;
+  ctx.strokeStyle = frame.tone;
+  ctx.strokeRect(border / 2, border / 2, width - border, height - border);
+
+  if (frameId === 'clean') {
+    ctx.lineWidth = Math.max(2, border * 0.08);
+    ctx.strokeStyle = 'rgba(17, 24, 39, 0.2)';
+    ctx.strokeRect(border, border, width - border * 2, height - border * 2);
+  }
+
+  if (frameId === 'birthday') {
+    drawConfetti(ctx, width, height, border);
+    drawRibbonText(ctx, 'HAPPY DAY', width, height, frame.accent);
+  }
+
+  if (frameId === 'birthday-cake') {
+    drawCake(ctx, width / 2, height, border, frame.accent);
+  }
+
+  if (frameId === 'wedding') {
+    drawCornerFlorals(ctx, width, height, border, frame.accent);
+    drawRibbonText(ctx, 'JUST MARRIED', width, height, frame.accent);
+  }
+
+  if (frameId === 'wedding-cake') {
+    drawCornerFlorals(ctx, width, height, border, frame.accent);
+    drawCake(ctx, width / 2, height, border, frame.accent);
+  }
+
+  if (frameId === 'retro') {
+    const innerBorder = border * 0.4;
+    ctx.lineWidth = innerBorder;
+    ctx.strokeStyle = frame.accent;
+    ctx.strokeRect(border + innerBorder / 2, border + innerBorder / 2, width - border * 2 - innerBorder, height - border * 2 - innerBorder);
+    drawRibbonText(ctx, 'CLASSIC', width, height, frame.accent);
+  }
+
+  if (frameId === 'fun') {
+    drawFunFrame(ctx, width, height, border);
+  }
+
+  if (frameId === 'holiday-beach') {
+    drawHolidayBeach(ctx, width, height, border);
+    drawRibbonText(ctx, 'SUMMER VIBES', width, height, '#0284c7');
+  }
+
+  if (frameId === 'holiday-mountain') {
+    drawHolidayMountain(ctx, width, height, border);
+    drawRibbonText(ctx, 'WILD & FREE', width, height, '#065f46');
+  }
+
+  if (frameId === 'holiday-island') {
+    drawHolidayIsland(ctx, width, height, border);
+    drawRibbonText(ctx, 'TROPICAL PARADISE', width, height, '#115e59');
+  }
+
+  ctx.restore();
+}
+
 function drawImageCover(ctx, image, x, y, width, height) {
   const scale = Math.max(width / image.naturalWidth, height / image.naturalHeight);
   const drawnWidth = image.naturalWidth * scale;
