@@ -1,3 +1,9 @@
+export const TIERS = [
+  { id: 'basic', name: 'Basic', pricePerHead: 35000, poseLimit: 8, printLimit: 1 },
+  { id: 'standard', name: 'Standard', pricePerHead: 50000, poseLimit: 16, printLimit: 2 },
+  { id: 'premium', name: 'Premium', pricePerHead: 75000, poseLimit: 24, printLimit: 4 },
+];
+
 export const FILTERS = [
   { id: 'normal', name: 'Normal', css: 'none' },
   { id: 'bw', name: 'Black & White', css: 'grayscale(1) contrast(1.08)' },
@@ -9,22 +15,24 @@ export const FILTERS = [
 ];
 
 export const FRAMES = [
-  { id: 'clean', name: 'Clean White', tone: '#ffffff', accent: '#111827' },
-  { id: 'birthday', name: 'Birthday', tone: '#ffec99', accent: '#ff4d8d' },
-  { id: 'birthday-cake', name: 'Birthday Kue', tone: '#fff1f2', accent: '#f43f5e' },
-  { id: 'wedding', name: 'Wedding', tone: '#fffaf0', accent: '#c8a96a' },
-  { id: 'wedding-cake', name: 'Wedding Kue', tone: '#fff7ed', accent: '#b48a5a' },
-  { id: 'retro', name: 'Retro Strip', tone: '#f6efe4', accent: '#e05a47' },
-  { id: 'fun', name: 'Fun Colorful', tone: '#d9f99d', accent: '#1d4ed8' },
-  { id: 'holiday-beach', name: 'Holiday Pantai', tone: '#dff8ff', accent: '#f59e0b' },
-  { id: 'holiday-mountain', name: 'Holiday Gunung', tone: '#ecfdf5', accent: '#15803d' },
-  { id: 'holiday-island', name: 'Holiday Pulau', tone: '#e0f2fe', accent: '#0f766e' },
+  { id: 'clean', name: 'Clean White', tone: '#ffffff', accent: '#111827', type: 'basic' },
+  { id: 'birthday', name: 'Birthday', tone: '#ffec99', accent: '#ff4d8d', type: 'premium' },
+  { id: 'birthday-cake', name: 'Birthday Kue', tone: '#fff1f2', accent: '#f43f5e', type: 'premium' },
+  { id: 'wedding', name: 'Wedding', tone: '#fffaf0', accent: '#c8a96a', type: 'premium' },
+  { id: 'wedding-cake', name: 'Wedding Kue', tone: '#fff7ed', accent: '#b48a5a', type: 'special' },
+  { id: 'retro', name: 'Retro Strip', tone: '#f6efe4', accent: '#e05a47', type: 'basic' },
+  { id: 'fun', name: 'Fun Colorful', tone: '#d9f99d', accent: '#1d4ed8', type: 'premium' },
+  { id: 'holiday-beach', name: 'Holiday Pantai', tone: '#dff8ff', accent: '#f59e0b', type: 'special' },
+  { id: 'holiday-mountain', name: 'Holiday Gunung', tone: '#ecfdf5', accent: '#15803d', type: 'special' },
+  { id: 'holiday-island', name: 'Holiday Pulau', tone: '#e0f2fe', accent: '#0f766e', type: 'special' },
 ];
 
 export const PHOTO_MODES = [
-  { id: 'single', name: 'Single', count: 1, description: '1 foto final' },
-  { id: 'card-4', name: '4 Shots', count: 4, description: 'Card 2 x 2' },
-  { id: 'card-6', name: '6 Shots', count: 6, description: 'Card 2 x 3' },
+  { id: 'strip-3', name: '6x2 Strip (3 Foto)', count: 3, type: 'strip', logoPos: 'bottom', description: 'Strip memanjang dengan 3 foto' },
+  { id: 'strip-4', name: '6x2 Strip (4 Foto)', count: 4, type: 'strip', logoPos: 'bottom', description: 'Strip memanjang dengan 4 foto' },
+  { id: 'landscape-1', name: '6x4 Landscape', count: 1, type: 'landscape', layout: 'single', description: '1 foto penuh' },
+  { id: 'landscape-4-grid', name: '6x4 Grid', count: 4, type: 'landscape', layout: 'grid', description: 'Grid 2x2 rapi' },
+  { id: 'landscape-4-asym', name: '6x4 Asimetris', count: 4, type: 'landscape', layout: 'asymmetric', description: '1 Besar, 3 Kecil' },
 ];
 
 export const SAWERIA_QR_URL = 'https://saweria.co/widgets/qr?streamKey=7755a5f97b72d7496a127ffe24b563e8';
@@ -40,127 +48,41 @@ export function createDownloadName(date = new Date()) {
   return `potobox-${stamp}.png`;
 }
 
-export function getPhotoCardLayout(count) {
-  if (count === 6) {
+export function getPhotoCardLayout(modeId) {
+  const mode = PHOTO_MODES.find(m => m.id === modeId) || PHOTO_MODES[0];
+  
+  if (mode.type === 'strip') {
+    // 4x6 portrait = 1200x1800. We draw 2 identical strips side by side.
     return {
-      columns: 2,
-      rows: 3,
+      type: 'strip',
       width: 1200,
       height: 1800,
-      gap: 34,
-      padding: 62,
-      footer: 130,
+      columns: 2, // 2 strips
+      photoCount: mode.count, // 3 or 4 photos per strip
+      stripWidth: 600,
+      padding: 40,
+      gap: 30,
+      logoPos: mode.logoPos
+    };
+  } else {
+    // landscape = 1800x1200
+    return {
+      type: 'landscape',
+      layoutStyle: mode.layout, // 'single', 'grid', 'asymmetric'
+      width: 1800,
+      height: 1200,
+      padding: 60,
+      gap: 40,
+      photoCount: mode.count
     };
   }
-
-  return {
-    columns: 2,
-    rows: 2,
-    width: 1200,
-    height: 1600,
-    gap: 34,
-    padding: 62,
-    footer: 130,
-  };
 }
 
-export function drawFrame(ctx, frameId, width, height) {
-  const frame = FRAMES.find((item) => item.id === frameId) ?? FRAMES[0];
-  const border = Math.max(22, Math.round(Math.min(width, height) * 0.045));
-
-  ctx.save();
-  ctx.lineWidth = border;
-  ctx.strokeStyle = frame.tone;
-  ctx.strokeRect(border / 2, border / 2, width - border, height - border);
-
-  if (frameId === 'clean') {
-    ctx.lineWidth = Math.max(2, border * 0.08);
-    ctx.strokeStyle = 'rgba(17, 24, 39, 0.2)';
-    ctx.strokeRect(border, border, width - border * 2, height - border * 2);
-  }
-
-  if (frameId === 'birthday') {
-    drawConfetti(ctx, width, height, border);
-    drawRibbonText(ctx, 'HAPPY DAY', width, height, frame.accent);
-  }
-
-  if (frameId === 'birthday-cake') {
-    drawConfetti(ctx, width, height, border);
-    drawCake(ctx, width / 2, height - border * 1.65, border, frame.accent);
-    drawRibbonText(ctx, 'BIRTHDAY CAKE', width, height, frame.accent);
-  }
-
-  if (frameId === 'wedding') {
-    drawCornerFlorals(ctx, width, height, border, frame.accent);
-    drawRibbonText(ctx, 'LOVE', width, height, frame.accent);
-  }
-
-  if (frameId === 'wedding-cake') {
-    drawCornerFlorals(ctx, width, height, border, frame.accent);
-    drawCake(ctx, width / 2, height - border * 1.65, border, frame.accent);
-    drawRibbonText(ctx, 'SWEET LOVE', width, height, frame.accent);
-  }
-
-  if (frameId === 'retro') {
-    ctx.fillStyle = frame.tone;
-    ctx.fillRect(0, 0, border * 1.35, height);
-    ctx.fillRect(width - border * 1.35, 0, border * 1.35, height);
-    ctx.fillStyle = frame.accent;
-    for (let y = border; y < height - border; y += border * 1.4) {
-      ctx.fillRect(border * 0.42, y, border * 0.42, border * 0.55);
-      ctx.fillRect(width - border * 0.84, y, border * 0.42, border * 0.55);
-    }
-  }
-
-  if (frameId === 'fun') {
-    drawFunFrame(ctx, width, height, border);
-  }
-
-  if (frameId === 'holiday-beach') {
-    drawHolidayBeach(ctx, width, height, border);
-    drawRibbonText(ctx, 'BEACH HOLIDAY', width, height, frame.accent);
-  }
-
-  if (frameId === 'holiday-mountain') {
-    drawHolidayMountain(ctx, width, height, border);
-    drawRibbonText(ctx, 'MOUNTAIN HOLIDAY', width, height, frame.accent);
-  }
-
-  if (frameId === 'holiday-island') {
-    drawHolidayIsland(ctx, width, height, border);
-    drawRibbonText(ctx, 'ISLAND HOLIDAY', width, height, frame.accent);
-  }
-
-  ctx.restore();
-}
-
-export async function composePhoto({ photo, filterId, frameId, mimeType = 'image/png' }) {
-  const image = await loadImage(photo);
-  const canvas = document.createElement('canvas');
-  canvas.width = image.naturalWidth;
-  canvas.height = image.naturalHeight;
-
-  const ctx = canvas.getContext('2d');
-  ctx.filter = getFilterStyle(filterId);
-  ctx.drawImage(image, 0, 0, canvas.width, canvas.height);
-  ctx.filter = 'none';
-  drawFrame(ctx, frameId, canvas.width, canvas.height);
-
-  return canvas.toDataURL(mimeType, 0.95);
-}
-
-export async function composePhotoCard({ photos, filterId, frameId, modeCount, mimeType = 'image/png' }) {
+export async function composePhotoCard({ photos, filterId, frameId, modeId, mimeType = 'image/png' }) {
   if (!photos?.length) return null;
-  if (photos.length === 1) {
-    return composePhoto({
-      photo: photos[0].src,
-      filterId,
-      frameId,
-      mimeType,
-    });
-  }
 
-  const layout = getPhotoCardLayout(modeCount || photos.length);
+  // Fallback to modeCount for backward compatibility if needed, but we prefer modeId
+  const layout = getPhotoCardLayout(modeId || 'strip-3');
   const canvas = document.createElement('canvas');
   canvas.width = layout.width;
   canvas.height = layout.height;
@@ -168,37 +90,157 @@ export async function composePhotoCard({ photos, filterId, frameId, modeCount, m
   const ctx = canvas.getContext('2d');
   ctx.fillStyle = '#fffdf8';
   ctx.fillRect(0, 0, canvas.width, canvas.height);
-  ctx.fillStyle = '#17202a';
-  ctx.font = '800 52px Inter, Arial, sans-serif';
-  ctx.textAlign = 'center';
-  ctx.fillText('Potobox', canvas.width / 2, canvas.height - 58);
 
-  const imageAreaHeight = canvas.height - layout.padding * 2 - layout.footer;
-  const cellWidth = (canvas.width - layout.padding * 2 - layout.gap * (layout.columns - 1)) / layout.columns;
-  const cellHeight = (imageAreaHeight - layout.gap * (layout.rows - 1)) / layout.rows;
+  const loadedImages = await Promise.all(photos.map((photo) => loadImage(photo.src || photo)));
 
-  const loadedImages = await Promise.all(photos.map((photo) => loadImage(photo.src)));
+  if (layout.type === 'strip') {
+    // --- DRAW 2 IDENTICAL STRIPS ---
+    const sWidth = layout.stripWidth;
+    const sPadding = layout.padding;
+    const sGap = layout.gap;
+    
+    // Calculate photo dimensions
+    const pWidth = sWidth - (sPadding * 2);
+    // Reserve space for logo
+    const logoHeight = 250;
+    const totalGapHeight = sGap * (layout.photoCount - 1);
+    const availableHeightForPhotos = layout.height - (sPadding * 2) - logoHeight - totalGapHeight;
+    const pHeight = availableHeightForPhotos / layout.photoCount;
 
-  loadedImages.forEach((image, index) => {
-    const row = Math.floor(index / layout.columns);
-    const column = index % layout.columns;
-    const x = layout.padding + column * (cellWidth + layout.gap);
-    const y = layout.padding + row * (cellHeight + layout.gap);
+    for (let stripIdx = 0; stripIdx < 2; stripIdx++) {
+      const startX = stripIdx * sWidth;
 
-    ctx.save();
-    ctx.beginPath();
-    roundRect(ctx, x, y, cellWidth, cellHeight, 24);
-    ctx.clip();
-    ctx.filter = getFilterStyle(filterId);
-    drawImageCover(ctx, image, x, y, cellWidth, cellHeight);
-    ctx.filter = 'none';
-    ctx.restore();
+      // Draw Logo
+      ctx.fillStyle = '#17202a';
+      ctx.font = '800 48px Inter, Arial, sans-serif';
+      ctx.textAlign = 'center';
+      
+      const logoY = layout.logoPos === 'top' ? sPadding + 100 : layout.height - sPadding - 50;
+      ctx.fillText('Groove &', startX + sWidth / 2, logoY - 25);
+      ctx.fillText('Photobooth', startX + sWidth / 2, logoY + 30);
+      
+      ctx.font = '400 24px Inter, Arial, sans-serif';
+      const today = new Date().toLocaleDateString('id-ID', { day: '2-digit', month: '2-digit', year: 'numeric' });
+      ctx.fillText(today, startX + sWidth / 2, logoY + 80);
 
-    ctx.lineWidth = 10;
-    ctx.strokeStyle = 'rgba(23, 32, 42, 0.12)';
-    roundRect(ctx, x, y, cellWidth, cellHeight, 24);
-    ctx.stroke();
-  });
+      // Draw Photos
+      const startYPhotos = layout.logoPos === 'top' ? sPadding + logoHeight : sPadding;
+
+      for (let i = 0; i < layout.photoCount; i++) {
+        const img = loadedImages[i % loadedImages.length];
+        const x = startX + sPadding;
+        const y = startYPhotos + (i * (pHeight + sGap));
+
+        ctx.save();
+        ctx.beginPath();
+        roundRect(ctx, x, y, pWidth, pHeight, 16);
+        ctx.clip();
+        ctx.filter = getFilterStyle(filterId);
+        drawImageCover(ctx, img, x, y, pWidth, pHeight);
+        ctx.filter = 'none';
+        ctx.restore();
+
+        ctx.lineWidth = 6;
+        ctx.strokeStyle = 'rgba(23, 32, 42, 0.12)';
+        roundRect(ctx, x, y, pWidth, pHeight, 16);
+        ctx.stroke();
+      }
+      
+      // Draw middle cut line
+      if (stripIdx === 0) {
+        ctx.beginPath();
+        ctx.moveTo(sWidth, 0);
+        ctx.lineTo(sWidth, layout.height);
+        ctx.lineWidth = 2;
+        ctx.strokeStyle = 'rgba(0,0,0,0.1)';
+        ctx.stroke();
+      }
+    }
+  } else {
+    // --- DRAW LANDSCAPE ---
+    if (layout.layoutStyle === 'single') {
+      const pWidth = layout.width - layout.padding * 2;
+      const pHeight = layout.height - layout.padding * 2;
+      const x = layout.padding;
+      const y = layout.padding;
+      
+      ctx.save();
+      ctx.beginPath();
+      roundRect(ctx, x, y, pWidth, pHeight, 24);
+      ctx.clip();
+      ctx.filter = getFilterStyle(filterId);
+      drawImageCover(ctx, loadedImages[0], x, y, pWidth, pHeight);
+      ctx.restore();
+
+    } else if (layout.layoutStyle === 'grid') {
+      const pWidth = (layout.width - layout.padding * 2 - layout.gap) / 2;
+      const pHeight = (layout.height - layout.padding * 2 - layout.gap) / 2;
+      
+      for (let i = 0; i < 4; i++) {
+        const img = loadedImages[i % loadedImages.length];
+        const row = Math.floor(i / 2);
+        const col = i % 2;
+        const x = layout.padding + col * (pWidth + layout.gap);
+        const y = layout.padding + row * (pHeight + layout.gap);
+
+        ctx.save();
+        ctx.beginPath();
+        roundRect(ctx, x, y, pWidth, pHeight, 24);
+        ctx.clip();
+        ctx.filter = getFilterStyle(filterId);
+        drawImageCover(ctx, img, x, y, pWidth, pHeight);
+        ctx.restore();
+      }
+    } else if (layout.layoutStyle === 'asymmetric') {
+      // 1 Large on top, 3 small on bottom. Plus Logo on the right of the bottom.
+      const pWidthLarge = layout.width - layout.padding * 2;
+      const pHeightLarge = (layout.height - layout.padding * 2 - layout.gap) * 0.65;
+      
+      // Large photo
+      ctx.save();
+      ctx.beginPath();
+      roundRect(ctx, layout.padding, layout.padding, pWidthLarge, pHeightLarge, 24);
+      ctx.clip();
+      ctx.filter = getFilterStyle(filterId);
+      drawImageCover(ctx, loadedImages[0], layout.padding, layout.padding, pWidthLarge, pHeightLarge);
+      ctx.restore();
+
+      // Small photos (3 photos)
+      const pWidthSmall = (pWidthLarge - (layout.gap * 3)) / 4; // 3 photos + 1 slot for Logo = 4 columns
+      const pHeightSmall = (layout.height - layout.padding * 2 - layout.gap) * 0.35;
+      const ySmall = layout.padding + pHeightLarge + layout.gap;
+
+      for (let i = 1; i < 4; i++) {
+        const img = loadedImages[i % loadedImages.length];
+        const col = i - 1;
+        const x = layout.padding + col * (pWidthSmall + layout.gap);
+
+        ctx.save();
+        ctx.beginPath();
+        roundRect(ctx, x, ySmall, pWidthSmall, pHeightSmall, 16);
+        ctx.clip();
+        ctx.filter = getFilterStyle(filterId);
+        drawImageCover(ctx, img, x, ySmall, pWidthSmall, pHeightSmall);
+        ctx.restore();
+      }
+
+      // Logo in the 4th column
+      const logoX = layout.padding + 3 * (pWidthSmall + layout.gap) + pWidthSmall / 2;
+      const logoY = ySmall + pHeightSmall / 2;
+      
+      ctx.fillStyle = '#17202a';
+      ctx.font = '800 48px Inter, Arial, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('Groove &', logoX, logoY - 30);
+      ctx.fillText('Photobooth', logoX, logoY + 20);
+      
+      ctx.font = '400 20px Inter, Arial, sans-serif';
+      const today = new Date().toLocaleDateString('id-ID', { day: '2-digit', month: '2-digit', year: 'numeric' });
+      ctx.fillText(today, logoX, logoY + 70);
+      ctx.textBaseline = 'alphabetic'; // reset
+    }
+  }
 
   drawFrame(ctx, frameId, canvas.width, canvas.height);
   return canvas.toDataURL(mimeType, 0.95);
