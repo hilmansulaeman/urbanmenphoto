@@ -1,12 +1,26 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { PHOTO_MODES, FRAMES } from '../utils/photoConfig.js';
+import { fetchCustomFrames } from '../utils/customFrameConfig.js';
 
 const PREMIUM_FRAME_PRICE = 5000;
 const SPECIAL_FRAME_PRICE = 10000;
 
 export default function UnifiedSelectionView({ onNext, onBack }) {
   const [selectedMode, setSelectedMode] = useState(PHOTO_MODES[1]); // default 4 shots
+  const [allFrames, setAllFrames] = useState(FRAMES);
   const [selectedFrame, setSelectedFrame] = useState(FRAMES[0]);
+
+  useEffect(() => {
+    const loadCustomFrames = async () => {
+      const fetched = await fetchCustomFrames();
+      const custom = fetched.map(f => ({
+        ...f,
+        type: 'custom'
+      }));
+      setAllFrames([...FRAMES, ...custom]);
+    };
+    loadCustomFrames();
+  }, []);
 
   const handleNext = () => {
     let addonPrice = 0;
@@ -47,10 +61,11 @@ export default function UnifiedSelectionView({ onNext, onBack }) {
         <div className="selector-group">
           <h3>2. Pilih Bingkai (Frame)</h3>
           <div className="frame-grid">
-            {FRAMES.map((frame) => {
+            {allFrames.map((frame) => {
               const isSelected = selectedFrame.id === frame.id;
               const isPremium = frame.type === 'premium';
               const isSpecial = frame.type === 'special';
+              const isCustom = frame.type === 'custom';
               
               return (
                 <button
@@ -60,14 +75,21 @@ export default function UnifiedSelectionView({ onNext, onBack }) {
                 >
                   {isPremium && <div className="premium-badge">+5k</div>}
                   {isSpecial && <div className="premium-badge" style={{ background: '#10b981' }}>+10k</div>}
+                  {isCustom && <div className="premium-badge" style={{ background: '#8b5cf6' }}>Custom</div>}
                   
-                  <div 
-                    className="frame-preview" 
-                    style={{ borderColor: frame.tone, outlineColor: frame.accent }}
-                  ></div>
+                  {isCustom ? (
+                    <div className="frame-preview" style={{ background: '#e9ecef', overflow: 'hidden', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                      <img src={frame.url} alt={frame.name} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                    </div>
+                  ) : (
+                    <div 
+                      className="frame-preview" 
+                      style={{ borderColor: frame.tone, outlineColor: frame.accent }}
+                    ></div>
+                  )}
                   <span>{frame.name}</span>
                   <span className="addon-price">
-                    {frame.type === 'basic' ? 'Gratis' : 
+                    {frame.type === 'basic' || frame.type === 'custom' ? 'Gratis' : 
                      frame.type === 'premium' ? `+ Rp ${PREMIUM_FRAME_PRICE.toLocaleString('id-ID')}` : 
                      `+ Rp ${SPECIAL_FRAME_PRICE.toLocaleString('id-ID')}`}
                   </span>

@@ -13,19 +13,21 @@ export async function getCameraStream(facingMode = 'user') {
   });
 }
 
-export function captureVideoFrame(video, { mirror = false } = {}) {
-  const width = video.videoWidth || 1280;
-  const height = video.videoHeight || 720;
-  const canvas = document.createElement('canvas');
-  canvas.width = width;
-  canvas.height = height;
+export function captureVideoFrame(videoElement, options = {}) {
+  const { mirror = false } = options;
 
+  const canvas = document.createElement('canvas');
+  canvas.width = videoElement.videoWidth;
+  canvas.height = videoElement.videoHeight;
   const ctx = canvas.getContext('2d');
+
   if (mirror) {
-    ctx.translate(width, 0);
+    ctx.translate(canvas.width, 0);
     ctx.scale(-1, 1);
   }
-  ctx.drawImage(video, 0, 0, width, height);
 
-  return canvas.toDataURL('image/png', 0.95);
+  // Draw base video
+  ctx.drawImage(videoElement, 0, 0, canvas.width, canvas.height);
+
+  return canvas.toDataURL('image/jpeg', 0.95);
 }

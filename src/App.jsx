@@ -10,6 +10,7 @@ import ThankYouScreen from './components/ThankYouScreen.jsx';
 import FilterPanel from './components/FilterPanel.jsx';
 import { FILTERS } from './utils/photoConfig.js';
 import MobileGalleryView from './components/MobileGalleryView.jsx';
+import AdminDashboard from './components/AdminDashboard.jsx';
 
 const STEPS = {
   IDLE: 'IDLE',
@@ -24,12 +25,18 @@ const STEPS = {
 };
 
 export default function App() {
-  // Simple router for client gallery
+  // Simple router for client gallery and admin
   const isGalleryRoute = window.location.pathname.startsWith('/gallery/');
   const sessionId = isGalleryRoute ? window.location.pathname.split('/gallery/')[1] : null;
 
+  const isAdminRoute = window.location.pathname.startsWith('/admin');
+
   if (isGalleryRoute && sessionId) {
     return <MobileGalleryView sessionId={sessionId} />;
+  }
+
+  if (isAdminRoute) {
+    return <AdminDashboard />;
   }
 
   const [currentStep, setCurrentStep] = useState(STEPS.IDLE);
@@ -73,9 +80,9 @@ export default function App() {
     switch (currentStep) {
       case STEPS.IDLE:
         return <LandingPage onStart={() => {
-          setOrderDetails(prev => ({ 
-            ...prev, 
-            tier: { id: 'basic', name: 'Basic Session', poseLimit: 20, printLimit: 1, price: 35000 }, 
+          setOrderDetails(prev => ({
+            ...prev,
+            tier: { id: 'basic', name: 'Basic Session', poseLimit: 1, printLimit: 1, price: 35000 },
             headCount: null,
             basePrice: 35000,
             totalPrice: 35000
@@ -119,30 +126,16 @@ export default function App() {
 
       case STEPS.CAMERA:
         return (
-          <section className="workspace camera-workspace">
-             <div className="stage-column">
-               <CameraView
-                  filter={orderDetails.filter}
-                  poseLimit={orderDetails.tier.poseLimit}
-                  onFinishSession={(photos) => {
-                    setCapturedPhotos(photos);
-                    setCurrentStep(STEPS.STUDIO_EDITOR);
-                  }}
-               />
-             </div>
-             <aside className="control-panel">
-               <FilterPanel
-                 filters={FILTERS}
-                 selectedId={orderDetails.filter.id}
-                 onSelect={(id) => {
-                   const newFilter = FILTERS.find(f => f.id === id);
-                   setOrderDetails(prev => ({ ...prev, filter: newFilter }));
-                 }}
-               />
-             </aside>
-          </section>
+          <CameraView
+            filter={orderDetails.filter}
+            poseLimit={5}
+            onFinishSession={(photos) => {
+              setCapturedPhotos(photos);
+              setCurrentStep(STEPS.STUDIO_EDITOR);
+            }}
+          />
         );
-        
+
       case STEPS.STUDIO_EDITOR:
         return (
           <StudioEditorView
@@ -154,7 +147,7 @@ export default function App() {
                 upsellPrice: result.upsellPrice,
                 upsellItems
               });
-              
+
               if (result.upsellPrice > 0) {
                 setCurrentStep(STEPS.PAYMENT_2);
               } else {
@@ -177,7 +170,7 @@ export default function App() {
             onBack={() => setCurrentStep(STEPS.UPSELL)}
           />
         );
-        
+
       case STEPS.LIVE_WALL_SHARE:
         return (
           <LiveWallView
@@ -193,9 +186,9 @@ export default function App() {
 
       default:
         return <LandingPage onStart={() => {
-          setOrderDetails(prev => ({ 
-            ...prev, 
-            tier: { id: 'basic', name: 'Basic Session', poseLimit: 20, printLimit: 1, price: 35000 }, 
+          setOrderDetails(prev => ({
+            ...prev,
+            tier: { id: 'basic', name: 'Basic Session', poseLimit: 20, printLimit: 1, price: 35000 },
             headCount: null,
             basePrice: 35000,
             totalPrice: 35000
@@ -209,10 +202,9 @@ export default function App() {
     <main className="app-shell wizard-shell">
       <header className="topbar">
         <button className="brand-button" type="button" onClick={resetApp}>
-          <span className="brand-mark">P</span>
+          <span className="brand-mark">up</span>
           <span>Urbanmenphoto</span>
         </button>
-        <span className="privacy-note">Client-only. No upload. No database.</span>
       </header>
 
       {renderStep()}

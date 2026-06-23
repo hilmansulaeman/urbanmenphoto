@@ -1,11 +1,27 @@
 import { useState } from 'react';
+import { logTransaction } from '../utils/transactionLogger.js';
 
-export default function PaymentView({ orderDetails, onPaymentSuccess, onBack, title = "Selesaikan Pembayaran", description = "Scan QRIS di bawah ini menggunakan aplikasi e-wallet Anda", showFeatures = false }) {
+export default function PaymentView({ orderDetails, onPaymentSuccess, onBack, title = "PEMBAYARAN", description = "Scan QRIS di bawah ini menggunakan aplikasi e-wallet Anda", showFeatures = false }) {
   const [isSimulating, setIsSimulating] = useState(false);
   const [extraPersons, setExtraPersons] = useState(0);
 
   const handleSimulatePayment = () => {
     setIsSimulating(true);
+
+    let pkgName = orderDetails.tier?.name || 'Package';
+    if (showFeatures) {
+       pkgName = `Basic Package (+${extraPersons} extra person)`;
+    } else if (orderDetails.upsellDetails) {
+       pkgName = `Upsell: ${orderDetails.upsellDetails.map(u => u.name).join(', ')}`;
+    }
+
+    logTransaction({
+      amount: currentTotal,
+      packageName: pkgName,
+      method: 'QRIS',
+      status: 'Success'
+    });
+
     // Simulate API call for payment verification
     setTimeout(() => {
       onPaymentSuccess();
@@ -38,29 +54,31 @@ export default function PaymentView({ orderDetails, onPaymentSuccess, onBack, ti
           <h3>Ringkasan Pesanan</h3>
           
           {showFeatures && (
-            <div style={{ textAlign: 'left', marginBottom: '1.5rem', background: '#f8fafc', padding: '1rem', borderRadius: '12px', fontSize: '0.95rem' }}>
-              <ul style={{ margin: 0, paddingLeft: '1.5rem', display: 'flex', flexDirection: 'column', gap: '0.5rem', color: 'var(--ink)' }}>
-                <li>Maks. 5 orang</li>
-                <li>5 menit sesi</li>
-                <li>1 lembar cetak (tambah cetak 5.000)</li>
-                <li>QR digital (send email/QR Download foto, link aktif 7 hari)</li>
-              </ul>
+            <>
+              <div style={{ textAlign: 'left', marginBottom: '1.5rem', background: '#f8fafc', padding: '1.25rem', borderRadius: '12px', fontSize: '0.85rem' }}>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '0.6rem', color: 'var(--ink)' }}>
+                  <div>Maks. 5 orang</div>
+                  <div>5 menit sesi</div>
+                  <div>1 lembar cetak (tambah cetak 5.000)</div>
+                  <div>QR digital (send email/QR Download foto, link aktif 7 hari)</div>
+                </div>
+              </div>
               
-              <div style={{ marginTop: '1.5rem', paddingTop: '1rem', borderTop: '1px solid var(--line)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <span style={{ fontWeight: 'bold' }}>Lebih dari 5 Orang?<br/><small style={{ fontWeight: 'normal', color: 'var(--muted)' }}>(+Rp 5.000 / orang)</small></span>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', background: 'white', padding: '0.5rem', borderRadius: '8px', border: '1px solid var(--line)' }}>
+              <div style={{ marginBottom: '1.5rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <span style={{ fontWeight: '800', fontSize: '0.85rem' }}>Lebih dari 5 Orang?<br/><small style={{ fontWeight: 'normal', color: 'var(--muted)', fontSize: '0.75rem' }}>(+Rp 5.000 / orang)</small></span>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', background: 'white', padding: '0.4rem', borderRadius: '8px', border: '1px solid var(--line)' }}>
                   <button 
                     onClick={() => setExtraPersons(Math.max(0, extraPersons - 1))}
-                    style={{ background: '#f1f5f9', border: 'none', width: '30px', height: '30px', borderRadius: '6px', cursor: 'pointer', fontWeight: 'bold' }}
+                    style={{ background: '#f8fafc', border: 'none', width: '28px', height: '28px', borderRadius: '6px', cursor: 'pointer', fontWeight: 'bold' }}
                   >-</button>
-                  <span style={{ fontWeight: 'bold', width: '20px', textAlign: 'center' }}>{extraPersons}</span>
+                  <span style={{ fontWeight: '800', width: '20px', textAlign: 'center', fontSize: '0.9rem' }}>{extraPersons}</span>
                   <button 
                     onClick={() => setExtraPersons(extraPersons + 1)}
-                    style={{ background: '#f1f5f9', border: 'none', width: '30px', height: '30px', borderRadius: '6px', cursor: 'pointer', fontWeight: 'bold' }}
+                    style={{ background: '#f8fafc', border: 'none', width: '28px', height: '28px', borderRadius: '6px', cursor: 'pointer', fontWeight: 'bold' }}
                   >+</button>
                 </div>
               </div>
-            </div>
+            </>
           )}
           
           {orderDetails.tier && !showFeatures && (
@@ -95,8 +113,8 @@ export default function PaymentView({ orderDetails, onPaymentSuccess, onBack, ti
         </div>
 
         <div className="qris-container">
-          <div className="qr-mock">
-            [MOCK QRIS IMAGE]
+          <div className="qr-mock" style={{ padding: '0', background: 'transparent', border: 'none' }}>
+            <img src="https://api.qrserver.com/v1/create-qr-code/?size=250x250&data=MockPayment" alt="QRIS" style={{ width: '100%', height: 'auto', borderRadius: '12px' }} />
           </div>
           <p className="payment-instruction">
             Mendukung pembayaran dari:<br/>

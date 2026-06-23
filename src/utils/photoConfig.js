@@ -1,3 +1,6 @@
+import { getFrameSettings } from './frameConfig.js';
+import { fetchCustomFrames } from './customFrameConfig.js';
+
 export const TIERS = [
   { id: 'basic', name: 'Basic', pricePerHead: 35000, poseLimit: 8, printLimit: 1 },
   { id: 'standard', name: 'Standard', pricePerHead: 50000, poseLimit: 16, printLimit: 2 },
@@ -111,17 +114,21 @@ export async function composePhotoCard({ photos, filterId, frameId, modeId, mime
       const startX = stripIdx * sWidth;
 
       // Draw Logo
+      const frameSettings = getFrameSettings();
+      
       ctx.fillStyle = '#17202a';
       ctx.font = '800 48px Inter, Arial, sans-serif';
       ctx.textAlign = 'center';
       
       const logoY = layout.logoPos === 'top' ? sPadding + 100 : layout.height - sPadding - 50;
-      ctx.fillText('Groove &', startX + sWidth / 2, logoY - 25);
-      ctx.fillText('Photobooth', startX + sWidth / 2, logoY + 30);
+      ctx.fillText(frameSettings.brandLine1, startX + sWidth / 2, logoY - 25);
+      ctx.fillText(frameSettings.brandLine2, startX + sWidth / 2, logoY + 30);
       
-      ctx.font = '400 24px Inter, Arial, sans-serif';
-      const today = new Date().toLocaleDateString('id-ID', { day: '2-digit', month: '2-digit', year: 'numeric' });
-      ctx.fillText(today, startX + sWidth / 2, logoY + 80);
+      if (frameSettings.showDate) {
+        ctx.font = '400 24px Inter, Arial, sans-serif';
+        const today = new Date().toLocaleDateString('id-ID', { day: '2-digit', month: '2-digit', year: 'numeric' });
+        ctx.fillText(today, startX + sWidth / 2, logoY + 80);
+      }
 
       // Draw Photos
       const startYPhotos = layout.logoPos === 'top' ? sPadding + logoHeight : sPadding;
@@ -228,21 +235,40 @@ export async function composePhotoCard({ photos, filterId, frameId, modeId, mime
       const logoX = layout.padding + 3 * (pWidthSmall + layout.gap) + pWidthSmall / 2;
       const logoY = ySmall + pHeightSmall / 2;
       
+      const frameSettings = getFrameSettings();
+
       ctx.fillStyle = '#17202a';
       ctx.font = '800 48px Inter, Arial, sans-serif';
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
-      ctx.fillText('Groove &', logoX, logoY - 30);
-      ctx.fillText('Photobooth', logoX, logoY + 20);
+      ctx.fillText(frameSettings.brandLine1, logoX, logoY - 30);
+      ctx.fillText(frameSettings.brandLine2, logoX, logoY + 20);
       
-      ctx.font = '400 20px Inter, Arial, sans-serif';
-      const today = new Date().toLocaleDateString('id-ID', { day: '2-digit', month: '2-digit', year: 'numeric' });
-      ctx.fillText(today, logoX, logoY + 70);
+      if (frameSettings.showDate) {
+        ctx.font = '400 20px Inter, Arial, sans-serif';
+        const today = new Date().toLocaleDateString('id-ID', { day: '2-digit', month: '2-digit', year: 'numeric' });
+        ctx.fillText(today, logoX, logoY + 70);
+      }
       ctx.textBaseline = 'alphabetic'; // reset
     }
   }
 
-  drawFrame(ctx, frameId, canvas.width, canvas.height);
+  if (frameId.startsWith('custom_')) {
+    const customFrames = await fetchCustomFrames();
+    const customFrame = customFrames.find(f => f.id === frameId);
+    if (customFrame && customFrame.url) {
+      try {
+        // Must wait for image to load to draw it
+        const overlayImg = await loadImage(customFrame.url);
+        ctx.drawImage(overlayImg, 0, 0, canvas.width, canvas.height);
+      } catch (e) {
+        console.error('Failed to load custom frame image', e);
+      }
+    }
+  } else {
+    drawFrame(ctx, frameId, canvas.width, canvas.height);
+  }
+  
   return canvas.toDataURL(mimeType, 0.95);
 }
 
