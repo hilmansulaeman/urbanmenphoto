@@ -20,6 +20,89 @@ npm install
 npm run dev
 ```
 
+## Backend API
+
+Backend Go tersedia di folder `backend/` dan bisa dijalankan terpisah dari frontend:
+
+```bash
+npm run backend:dev
+```
+
+Default API berjalan di:
+
+```text
+http://localhost:8787
+```
+
+Swagger UI tersedia di:
+
+```text
+http://localhost:8787/swagger
+```
+
+Untuk endpoint admin, buat admin pertama lewat CLI. Jangan simpan email/password admin di `.env`.
+
+```bash
+npm run backend:admin -- -email admin@urbanmenphoto.com -role owner
+npm run backend:dev
+```
+
+Login ke `POST /api/admin/auth/login`, lalu gunakan header:
+
+```text
+authorization: Bearer <admin-token>
+```
+
+Untuk PostgreSQL lokal:
+
+```bash
+cd backend
+docker compose up -d
+```
+
+Lalu isi `DATABASE_URL` di `backend/.env`. Jika `DATABASE_URL` kosong, backend tetap memakai JSON lokal.
+
+Endpoint utama:
+
+```text
+GET /health
+GET /swagger
+GET /swagger/openapi.yaml
+GET /api/galleries/:sessionId
+POST /api/sessions
+GET /api/sessions/:id
+PATCH /api/sessions/:id
+POST /api/sessions/:id/finalize
+POST /api/sessions/:id/send-link
+POST /api/sessions/:id/expire
+POST /api/payments
+GET /api/payments/:id
+POST /api/payments/:id/webhook
+GET /api/frames
+GET /api/admin/sessions
+GET /api/admin/sessions/:id
+GET /api/admin/stats
+DELETE /api/admin/sessions/:id
+POST /api/admin/auth/login
+POST /api/admin/auth/logout
+GET /api/admin/auth/me
+GET /api/admin/users
+POST /api/admin/users
+PATCH /api/admin/users/:id
+DELETE /api/admin/users/:id
+GET /api/admin/messages
+GET /api/admin/payments
+GET /api/admin/payment-logs
+GET /api/admin/transactions
+POST /api/admin/cleanup
+GET /api/admin/frames
+POST /api/admin/frames
+PUT /api/admin/frames/:id
+DELETE /api/admin/frames/:id
+```
+
+Metadata sesi sementara disimpan di `backend/data/db.json`, sedangkan file foto di `backend/storage/`. Keduanya diabaikan oleh Git karena hanya untuk data runtime lokal. Draft schema PostgreSQL tersedia di `backend/migrations/001_initial_schema.sql`.
+
 ## Build
 
 ```bash

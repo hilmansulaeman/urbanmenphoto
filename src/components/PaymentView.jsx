@@ -1,12 +1,15 @@
 import { useState } from 'react';
 import { logTransaction } from '../utils/transactionLogger.js';
+import { backendRequest } from '../utils/backendApi.js';
 
 export default function PaymentView({ orderDetails, onPaymentSuccess, onBack, title = "PEMBAYARAN", description = "Scan QRIS di bawah ini menggunakan aplikasi e-wallet Anda", showFeatures = false }) {
   const [isSimulating, setIsSimulating] = useState(false);
+  const [paymentError, setPaymentError] = useState('');
   const [extraPersons, setExtraPersons] = useState(0);
 
-  const handleSimulatePayment = () => {
+  const handleSimulatePayment = async () => {
     setIsSimulating(true);
+    setPaymentError('');
 
     let pkgName = orderDetails.tier?.name || 'Package';
     if (showFeatures) {
@@ -22,10 +25,44 @@ export default function PaymentView({ orderDetails, onPaymentSuccess, onBack, ti
       status: 'Success'
     });
 
-    // Simulate API call for payment verification
-    setTimeout(() => {
-      onPaymentSuccess();
-    }, 2000);
+    try {
+      const session = orderDetails.backendSession || await backendRequest('/api/sessions', null, {
+        method: 'POST',
+        body: JSON.stringify({
+          status: 'created',
+          paperSize: orderDetails.paperSize,
+          layoutId: orderDetails.layoutId,
+          frameId: orderDetails.frameId,
+        }),
+      });
+      let payment = await backendRequest('/api/payments', null, {
+        method: 'POST',
+        body: JSON.stringify({
+          sessionId: session.id,
+          provider: 'qris-simulation',
+          amount: currentTotal,
+          currency: 'IDR',
+        }),
+      });
+      const webhookSecret = import.meta.env.VITE_PAYMENT_WEBHOOK_SECRET;
+      if (webhookSecret) {
+        try {
+          payment = await backendRequest(`/api/payments/${payment.id}/webhook`, null, {
+            method: 'POST',
+            headers: { 'x-webhook-secret': webhookSecret },
+            body: JSON.stringify({ status: 'paid' }),
+          });
+        } catch (webhookErr) {
+          console.warn('Payment webhook simulation failed:', webhookErr);
+        }
+      }
+      setTimeout(() => {
+        onPaymentSuccess({ session, payment });
+      }, 1200);
+    } catch (err) {
+      setIsSimulating(false);
+      setPaymentError(err.message);
+    }
   };
 
   const extraPersonPrice = 5000;
@@ -110,6 +147,9 @@ export default function PaymentView({ orderDetails, onPaymentSuccess, onBack, ti
           <button className="primary-action simulate-btn" onClick={handleSimulatePayment} style={{ marginTop: '2rem' }}>
             Simulasikan Bayar Berhasil
           </button>
+          {paymentError && (
+            <p style={{ margin: '1rem 0 0', color: '#dc2626', fontWeight: 700, fontSize: '0.85rem' }}>{paymentError}</p>
+          )}
         </div>
 
         <div className="qris-container">

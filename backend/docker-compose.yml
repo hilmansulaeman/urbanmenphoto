@@ -1,0 +1,21 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: urbanmenphoto-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: urbanmenphoto
+      POSTGRES_USER: urbanmen
+      POSTGRES_PASSWORD: urbanmen_dev_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - urbanmenphoto_postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U urbanmen -d urbanmenphoto"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  urbanmenphoto_postgres:

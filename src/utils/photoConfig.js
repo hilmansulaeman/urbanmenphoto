@@ -1,5 +1,5 @@
 import { getFrameSettings } from './frameConfig.js';
-import { fetchCustomFrames } from './customFrameConfig.js';
+import { DEFAULT_FRAME_HEIGHT, DEFAULT_FRAME_WIDTH, fetchCustomFrames, normalizeFrameConfig } from './customFrameConfig.js';
 
 export const TIERS = [
   { id: 'basic', name: 'Basic', pricePerHead: 35000, poseLimit: 8, printLimit: 1 },
@@ -31,11 +31,18 @@ export const FRAMES = [
 ];
 
 export const PHOTO_MODES = [
-  { id: 'strip-3', name: '6x2 Strip (3 Foto)', count: 3, type: 'strip', logoPos: 'bottom', description: 'Strip memanjang dengan 3 foto' },
-  { id: 'strip-4', name: '6x2 Strip (4 Foto)', count: 4, type: 'strip', logoPos: 'bottom', description: 'Strip memanjang dengan 4 foto' },
-  { id: 'landscape-1', name: '6x4 Landscape', count: 1, type: 'landscape', layout: 'single', description: '1 foto penuh' },
-  { id: 'landscape-4-grid', name: '6x4 Grid', count: 4, type: 'landscape', layout: 'grid', description: 'Grid 2x2 rapi' },
-  { id: 'landscape-4-asym', name: '6x4 Asimetris', count: 4, type: 'landscape', layout: 'asymmetric', description: '1 Besar, 3 Kecil' },
+  { id: 'layout-3', name: '3 Foto', count: 3, columns: 1, description: 'Tiga foto vertikal' },
+  { id: 'layout-4', name: '4 Foto', count: 4, columns: 1, description: 'Empat foto vertikal' },
+  { id: 'layout-6', name: '6 Foto', count: 6, columns: 2, description: 'Enam foto grid 2 kolom' },
+  { id: 'layout-8', name: '8 Foto', count: 8, columns: 2, description: 'Delapan foto grid 2 kolom' },
+];
+
+export const PAPER_SIZES = [
+  { id: 'strip-2x6', name: 'Strip 2x6', width: 600, height: 1800, description: 'Strip photobooth 2 x 6 inch' },
+  { id: '4r', name: '4R', width: 1200, height: 1800, description: 'Ukuran cetak 4 x 6 inch' },
+  { id: '2r', name: '2R', width: 750, height: 1050, description: 'Ukuran cetak 2.5 x 3.5 inch' },
+  { id: '3r', name: '3R', width: 1050, height: 1500, description: 'Ukuran cetak 3.5 x 5 inch' },
+  { id: '5r', name: '5R', width: 1500, height: 2100, description: 'Ukuran cetak 5 x 7 inch' },
 ];
 
 export const SAWERIA_QR_URL = 'https://saweria.co/widgets/qr?streamKey=7755a5f97b72d7496a127ffe24b563e8';
@@ -46,227 +53,178 @@ export function getFilterStyle(filterId) {
   return FILTERS.find((filter) => filter.id === filterId)?.css ?? 'none';
 }
 
+export function getEditorFilterStyle(filterName) {
+  switch (filterName?.toUpperCase()) {
+    case 'B&W': return 'grayscale(100%)';
+    case 'NEGATIVE': return 'invert(1)';
+    case 'BRIGHTEN': return 'brightness(1.3)';
+    case 'DARKEN': return 'brightness(0.7)';
+    case 'WARM': return 'sepia(0.4) saturate(1.4) hue-rotate(-15deg)';
+    case 'COOL': return 'saturate(1.2) hue-rotate(15deg) contrast(1.1)';
+    case 'BLUR': return 'blur(3px)';
+    case 'SHARPEN': return 'contrast(1.5) saturate(1.2)';
+    case 'BEAUTY': return 'brightness(1.15) contrast(0.9) blur(0.5px)';
+    case 'CONTRAST +': return 'contrast(1.4)';
+    case 'CONTRAST -': return 'contrast(0.6)';
+    case 'SATURATION +': return 'saturate(1.6)';
+    case 'SATURATION -': return 'saturate(0.4)';
+    case 'CINEMATIC': return 'contrast(1.3) saturate(0.8) sepia(0.3)';
+    case 'VINTAGE': return 'sepia(0.6) contrast(1.2) brightness(0.9)';
+    case 'SEPIA': return 'sepia(1)';
+    case 'OLD FILM': return 'sepia(0.8) contrast(1.5) brightness(0.8) grayscale(0.5)';
+    case 'RETRO PURPLE': return 'hue-rotate(45deg) saturate(1.5) contrast(1.2)';
+    case 'RETRO TEAL': return 'hue-rotate(-45deg) saturate(1.5) contrast(1.2)';
+    case 'NIGHT VISION': return 'sepia(1) hue-rotate(90deg) saturate(3) brightness(1.2)';
+    case 'X-RAY': return 'invert(1) grayscale(1) contrast(2)';
+    case 'GRAYSCALE': return 'grayscale(1)';
+    case 'DREAMY': return 'brightness(1.2) contrast(0.8) blur(1px) saturate(1.2)';
+    case 'BLOOM': return 'brightness(1.3) contrast(1.1) blur(0.5px)';
+    default: return 'none';
+  }
+}
+
 export function createDownloadName(date = new Date()) {
   const stamp = date.toISOString().replace(/\.\d{3}Z$/, '').replace('T', '-').replaceAll(':', '-');
   return `potobox-${stamp}.png`;
 }
 
-export function getPhotoCardLayout(modeId) {
+export function getPhotoCardLayout(modeId, paperSizeId = '4r') {
   const mode = PHOTO_MODES.find(m => m.id === modeId) || PHOTO_MODES[0];
-  
-  if (mode.type === 'strip') {
-    // 4x6 portrait = 1200x1800. We draw 2 identical strips side by side.
-    return {
-      type: 'strip',
-      width: 1200,
-      height: 1800,
-      columns: 2, // 2 strips
-      photoCount: mode.count, // 3 or 4 photos per strip
-      stripWidth: 600,
-      padding: 40,
-      gap: 30,
-      logoPos: mode.logoPos
-    };
-  } else {
-    // landscape = 1800x1200
-    return {
-      type: 'landscape',
-      layoutStyle: mode.layout, // 'single', 'grid', 'asymmetric'
-      width: 1800,
-      height: 1200,
-      padding: 60,
-      gap: 40,
-      photoCount: mode.count
-    };
-  }
+  const paper = PAPER_SIZES.find(size => size.id === paperSizeId) || PAPER_SIZES[1];
+  const columns = mode.columns || 1;
+  const rows = Math.ceil(mode.count / columns);
+  const padding = Math.round(paper.width * 0.07);
+  const gap = Math.round(paper.width * 0.035);
+  const logoHeight = Math.round(paper.height * 0.12);
+
+  return {
+    type: 'grid',
+    width: paper.width,
+    height: paper.height,
+    paperSizeId: paper.id,
+    paperName: paper.name,
+    columns,
+    rows,
+    photoCount: mode.count,
+    padding,
+    gap,
+    logoHeight,
+  };
 }
 
-export async function composePhotoCard({ photos, filterId, frameId, modeId, mimeType = 'image/png' }) {
+export async function composePhotoCard({ photos, filterId, frameId, frame, frameConfig, slotState, modeId, paperSizeId = '4r', mimeType = 'image/png' }) {
   if (!photos?.length) return null;
 
   // Fallback to modeCount for backward compatibility if needed, but we prefer modeId
-  const layout = getPhotoCardLayout(modeId || 'strip-3');
+  const layout = getPhotoCardLayout(modeId || 'layout-3', paperSizeId);
+  const resolvedFrameId = frameId || frame?.id || '';
+  const isCustom = resolvedFrameId.startsWith('custom_') || Boolean(frameConfig?.frameImage || frame?.frameImage || frame?.url);
+  let customFrame = null;
+  if (frameConfig) {
+    customFrame = normalizeFrameConfig(frameConfig);
+  } else if (frame && isCustom) {
+    customFrame = normalizeFrameConfig(frame);
+  } else if (isCustom) {
+    const customFrames = await fetchCustomFrames();
+    const fetchedFrame = customFrames.find(f => f.id === resolvedFrameId);
+    customFrame = fetchedFrame ? normalizeFrameConfig(fetchedFrame) : null;
+  }
+
+  const hasCustomSlots = customFrame?.slots?.length > 0;
+
+  // If the custom frame JSON provides specific canvas dimensions, use them.
+  // Otherwise: custom frames default to 1080x1920 (Figma export default), grid frames use layout.
+  const canvasWidth = hasCustomSlots
+    ? (customFrame.width || DEFAULT_FRAME_WIDTH)
+    : layout.width;
+  const canvasHeight = hasCustomSlots
+    ? (customFrame.height || DEFAULT_FRAME_HEIGHT)
+    : layout.height;
+
   const canvas = document.createElement('canvas');
-  canvas.width = layout.width;
-  canvas.height = layout.height;
+  canvas.width = canvasWidth;
+  canvas.height = canvasHeight;
 
   const ctx = canvas.getContext('2d');
-  ctx.fillStyle = '#fffdf8';
+  ctx.fillStyle = hasCustomSlots && customFrame.background ? customFrame.background : '#fffdf8';
   ctx.fillRect(0, 0, canvas.width, canvas.height);
 
   const loadedImages = await Promise.all(photos.map((photo) => loadImage(photo.src || photo)));
 
-  if (layout.type === 'strip') {
-    // --- DRAW 2 IDENTICAL STRIPS ---
-    const sWidth = layout.stripWidth;
-    const sPadding = layout.padding;
-    const sGap = layout.gap;
-    
-    // Calculate photo dimensions
-    const pWidth = sWidth - (sPadding * 2);
-    // Reserve space for logo
-    const logoHeight = 250;
-    const totalGapHeight = sGap * (layout.photoCount - 1);
-    const availableHeightForPhotos = layout.height - (sPadding * 2) - logoHeight - totalGapHeight;
-    const pHeight = availableHeightForPhotos / layout.photoCount;
+  if (hasCustomSlots) {
+    // --- DRAW CUSTOM SLOTS ---
+    customFrame.slots.forEach((slot, index) => {
+      const transform = slotState?.[index] || {};
+      const photoIndex = Number.isInteger(transform.photoIdx) ? transform.photoIdx : index;
+      const img = loadedImages[((photoIndex % loadedImages.length) + loadedImages.length) % loadedImages.length];
+      const baseFilter = getFilterStyle(filterId);
+      const slotFilter = getEditorFilterStyle(transform.filter || 'ORIGINAL');
+      const combinedFilter = [baseFilter, slotFilter].filter((filter) => filter && filter !== 'none').join(' ') || 'none';
 
-    for (let stripIdx = 0; stripIdx < 2; stripIdx++) {
-      const startX = stripIdx * sWidth;
+      drawPhotoInSlot(ctx, img, slot, transform, combinedFilter);
+    });
 
-      // Draw Logo
-      const frameSettings = getFrameSettings();
-      
-      ctx.fillStyle = '#17202a';
-      ctx.font = '800 48px Inter, Arial, sans-serif';
-      ctx.textAlign = 'center';
-      
-      const logoY = layout.logoPos === 'top' ? sPadding + 100 : layout.height - sPadding - 50;
-      ctx.fillText(frameSettings.brandLine1, startX + sWidth / 2, logoY - 25);
-      ctx.fillText(frameSettings.brandLine2, startX + sWidth / 2, logoY + 30);
-      
-      if (frameSettings.showDate) {
-        ctx.font = '400 24px Inter, Arial, sans-serif';
-        const today = new Date().toLocaleDateString('id-ID', { day: '2-digit', month: '2-digit', year: 'numeric' });
-        ctx.fillText(today, startX + sWidth / 2, logoY + 80);
-      }
-
-      // Draw Photos
-      const startYPhotos = layout.logoPos === 'top' ? sPadding + logoHeight : sPadding;
-
-      for (let i = 0; i < layout.photoCount; i++) {
-        const img = loadedImages[i % loadedImages.length];
-        const x = startX + sPadding;
-        const y = startYPhotos + (i * (pHeight + sGap));
-
-        ctx.save();
-        ctx.beginPath();
-        roundRect(ctx, x, y, pWidth, pHeight, 16);
-        ctx.clip();
-        ctx.filter = getFilterStyle(filterId);
-        drawImageCover(ctx, img, x, y, pWidth, pHeight);
-        ctx.filter = 'none';
-        ctx.restore();
-
-        ctx.lineWidth = 6;
-        ctx.strokeStyle = 'rgba(23, 32, 42, 0.12)';
-        roundRect(ctx, x, y, pWidth, pHeight, 16);
-        ctx.stroke();
-      }
-      
-      // Draw middle cut line
-      if (stripIdx === 0) {
-        ctx.beginPath();
-        ctx.moveTo(sWidth, 0);
-        ctx.lineTo(sWidth, layout.height);
-        ctx.lineWidth = 2;
-        ctx.strokeStyle = 'rgba(0,0,0,0.1)';
-        ctx.stroke();
-      }
-    }
   } else {
-    // --- DRAW LANDSCAPE ---
-    if (layout.layoutStyle === 'single') {
-      const pWidth = layout.width - layout.padding * 2;
-      const pHeight = layout.height - layout.padding * 2;
-      const x = layout.padding;
-      const y = layout.padding;
-      
+    const frameSettings = getFrameSettings();
+    const logoY = layout.padding + layout.logoHeight * 0.36;
+
+    ctx.fillStyle = '#17202a';
+    ctx.font = `800 ${Math.round(layout.width * 0.04)}px Inter, Arial, sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.fillText(frameSettings.brandLine1, layout.width / 2, logoY);
+    ctx.fillText(frameSettings.brandLine2, layout.width / 2, logoY + Math.round(layout.width * 0.045));
+
+    if (frameSettings.showDate) {
+      ctx.font = `400 ${Math.round(layout.width * 0.022)}px Inter, Arial, sans-serif`;
+      const today = new Date().toLocaleDateString('id-ID', { day: '2-digit', month: '2-digit', year: 'numeric' });
+      ctx.fillText(today, layout.width / 2, logoY + Math.round(layout.width * 0.085));
+    }
+
+    const gridTop = layout.padding + layout.logoHeight;
+    const gridHeight = layout.height - gridTop - layout.padding;
+    const pWidth = (layout.width - layout.padding * 2 - layout.gap * (layout.columns - 1)) / layout.columns;
+    const pHeight = (gridHeight - layout.gap * (layout.rows - 1)) / layout.rows;
+
+    for (let i = 0; i < layout.photoCount; i++) {
+      const transform = slotState?.[i] || {};
+      const photoIndex = Number.isInteger(transform.photoIdx) ? transform.photoIdx : i;
+      const img = loadedImages[((photoIndex % loadedImages.length) + loadedImages.length) % loadedImages.length];
+      const row = Math.floor(i / layout.columns);
+      const col = i % layout.columns;
+      const x = layout.padding + col * (pWidth + layout.gap);
+      const y = gridTop + row * (pHeight + layout.gap);
+      const baseFilter = getFilterStyle(filterId);
+      const slotFilter = getEditorFilterStyle(transform.filter || 'ORIGINAL');
+      const combinedFilter = [baseFilter, slotFilter].filter((filter) => filter && filter !== 'none').join(' ') || 'none';
+
       ctx.save();
       ctx.beginPath();
-      roundRect(ctx, x, y, pWidth, pHeight, 24);
+      roundRect(ctx, x, y, pWidth, pHeight, 18);
       ctx.clip();
-      ctx.filter = getFilterStyle(filterId);
-      drawImageCover(ctx, loadedImages[0], x, y, pWidth, pHeight);
+      ctx.filter = combinedFilter;
+      drawImageCover(ctx, img, x, y, pWidth, pHeight);
+      ctx.filter = 'none';
       ctx.restore();
 
-    } else if (layout.layoutStyle === 'grid') {
-      const pWidth = (layout.width - layout.padding * 2 - layout.gap) / 2;
-      const pHeight = (layout.height - layout.padding * 2 - layout.gap) / 2;
-      
-      for (let i = 0; i < 4; i++) {
-        const img = loadedImages[i % loadedImages.length];
-        const row = Math.floor(i / 2);
-        const col = i % 2;
-        const x = layout.padding + col * (pWidth + layout.gap);
-        const y = layout.padding + row * (pHeight + layout.gap);
-
-        ctx.save();
-        ctx.beginPath();
-        roundRect(ctx, x, y, pWidth, pHeight, 24);
-        ctx.clip();
-        ctx.filter = getFilterStyle(filterId);
-        drawImageCover(ctx, img, x, y, pWidth, pHeight);
-        ctx.restore();
-      }
-    } else if (layout.layoutStyle === 'asymmetric') {
-      // 1 Large on top, 3 small on bottom. Plus Logo on the right of the bottom.
-      const pWidthLarge = layout.width - layout.padding * 2;
-      const pHeightLarge = (layout.height - layout.padding * 2 - layout.gap) * 0.65;
-      
-      // Large photo
-      ctx.save();
-      ctx.beginPath();
-      roundRect(ctx, layout.padding, layout.padding, pWidthLarge, pHeightLarge, 24);
-      ctx.clip();
-      ctx.filter = getFilterStyle(filterId);
-      drawImageCover(ctx, loadedImages[0], layout.padding, layout.padding, pWidthLarge, pHeightLarge);
-      ctx.restore();
-
-      // Small photos (3 photos)
-      const pWidthSmall = (pWidthLarge - (layout.gap * 3)) / 4; // 3 photos + 1 slot for Logo = 4 columns
-      const pHeightSmall = (layout.height - layout.padding * 2 - layout.gap) * 0.35;
-      const ySmall = layout.padding + pHeightLarge + layout.gap;
-
-      for (let i = 1; i < 4; i++) {
-        const img = loadedImages[i % loadedImages.length];
-        const col = i - 1;
-        const x = layout.padding + col * (pWidthSmall + layout.gap);
-
-        ctx.save();
-        ctx.beginPath();
-        roundRect(ctx, x, ySmall, pWidthSmall, pHeightSmall, 16);
-        ctx.clip();
-        ctx.filter = getFilterStyle(filterId);
-        drawImageCover(ctx, img, x, ySmall, pWidthSmall, pHeightSmall);
-        ctx.restore();
-      }
-
-      // Logo in the 4th column
-      const logoX = layout.padding + 3 * (pWidthSmall + layout.gap) + pWidthSmall / 2;
-      const logoY = ySmall + pHeightSmall / 2;
-      
-      const frameSettings = getFrameSettings();
-
-      ctx.fillStyle = '#17202a';
-      ctx.font = '800 48px Inter, Arial, sans-serif';
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillText(frameSettings.brandLine1, logoX, logoY - 30);
-      ctx.fillText(frameSettings.brandLine2, logoX, logoY + 20);
-      
-      if (frameSettings.showDate) {
-        ctx.font = '400 20px Inter, Arial, sans-serif';
-        const today = new Date().toLocaleDateString('id-ID', { day: '2-digit', month: '2-digit', year: 'numeric' });
-        ctx.fillText(today, logoX, logoY + 70);
-      }
-      ctx.textBaseline = 'alphabetic'; // reset
+      ctx.lineWidth = Math.max(3, Math.round(layout.width * 0.005));
+      ctx.strokeStyle = 'rgba(23, 32, 42, 0.12)';
+      roundRect(ctx, x, y, pWidth, pHeight, 18);
+      ctx.stroke();
     }
   }
 
-  if (frameId.startsWith('custom_')) {
-    const customFrames = await fetchCustomFrames();
-    const customFrame = customFrames.find(f => f.id === frameId);
-    if (customFrame && customFrame.url) {
+  if (isCustom) {
+    if (customFrame?.frameImage) {
       try {
         // Must wait for image to load to draw it
-        const overlayImg = await loadImage(customFrame.url);
+        const overlayImg = await loadImage(customFrame.frameImage);
         ctx.drawImage(overlayImg, 0, 0, canvas.width, canvas.height);
       } catch (e) {
         console.error('Failed to load custom frame image', e);
       }
     }
   } else {
-    drawFrame(ctx, frameId, canvas.width, canvas.height);
+    drawFrame(ctx, resolvedFrameId, canvas.width, canvas.height);
   }
   
   return canvas.toDataURL(mimeType, 0.95);
@@ -345,9 +303,38 @@ function drawImageCover(ctx, image, x, y, width, height) {
   ctx.drawImage(image, offsetX, offsetY, drawnWidth, drawnHeight);
 }
 
+function drawPhotoInSlot(ctx, image, slot, transform = {}, filter = 'none') {
+  const cx = slot.x + slot.width / 2;
+  const cy = slot.y + slot.height / 2;
+  const rx = -slot.width / 2;
+  const ry = -slot.height / 2;
+
+  ctx.save();
+  ctx.translate(cx, cy);
+  if (slot.rotate) {
+    ctx.rotate((slot.rotate * Math.PI) / 180);
+  }
+
+  ctx.beginPath();
+  roundRect(ctx, rx, ry, slot.width, slot.height, slot.borderRadius || 0);
+  ctx.clip();
+
+  ctx.filter = filter;
+  ctx.translate(Number(transform.x || 0), Number(transform.y || 0));
+  ctx.rotate(((Number(transform.rotate) || 0) * Math.PI) / 180);
+  ctx.scale(
+    (transform.flipH ? -1 : 1) * (Number(transform.zoom) || 1),
+    (transform.flipV ? -1 : 1) * (Number(transform.zoom) || 1),
+  );
+  drawImageCover(ctx, image, rx, ry, slot.width, slot.height);
+  ctx.filter = 'none';
+  ctx.restore();
+}
+
 function loadImage(src) {
   return new Promise((resolve, reject) => {
     const image = new Image();
+    image.crossOrigin = 'anonymous';
     image.onload = () => resolve(image);
     image.onerror = reject;
     image.src = src;

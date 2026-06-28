@@ -1,3 +1,9 @@
 node_modules/
 package-lock.json
 dist/
+backend/.env
+backend/data/
+backend/storage/
+backend/.cache/
+backend/backend/data/
+backend/backend/storage/

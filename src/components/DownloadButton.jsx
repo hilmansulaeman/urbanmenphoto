@@ -15,7 +15,11 @@ export default function DownloadButton({ photos, filter, frame, mode }) {
         photos,
         filterId: filter.id,
         frameId: frame.id,
-        modeCount: mode.count,
+        frame,
+        frameConfig: frame.frameConfig,
+        slotState: frame.slotState,
+        modeId: mode.id,
+        paperSizeId: mode.paperSize?.id,
       });
       const link = document.createElement('a');
       link.href = dataUrl;

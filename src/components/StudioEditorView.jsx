@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
-import { PHOTO_MODES, FRAMES } from '../utils/photoConfig.js';
+import { PHOTO_MODES, PAPER_SIZES, FRAMES } from '../utils/photoConfig.js';
+import { fetchCustomFrames } from '../utils/customFrameConfig.js';
 
 const MenuIcon = () => (
   <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" style={{width: 16, height: 16}}>
@@ -54,6 +55,18 @@ const getMockCssFilter = (filterName) => {
 export default function StudioEditorView({ photos = [], onNext }) {
   const [step, setStep] = useState('choose_frame'); // 'choose_frame' | 'edit_photo' | 'filter_photo' | 'edit_video' | 'video_settings'
   const [activeFrame, setActiveFrame] = useState(FRAMES[0] || { id: 'default', name: 'Default', tone: '#fff', accent: '#000' });
+  const [availableFrames, setAvailableFrames] = useState(FRAMES);
+  const [selectedLayout, setSelectedLayout] = useState(PHOTO_MODES[1] || PHOTO_MODES[0]);
+  const [selectedPaperSize, setSelectedPaperSize] = useState(PAPER_SIZES[1] || PAPER_SIZES[0]);
+
+  useEffect(() => {
+    async function loadFrames() {
+      const custom = await fetchCustomFrames();
+      setAvailableFrames([...FRAMES, ...custom]);
+    }
+    loadFrames();
+  }, []);
+
   const [activeCategory, setActiveCategory] = useState('Semua');
   const [filterCategory, setFilterCategory] = useState('ESSENTIAL');
   const [videoFilter, setVideoFilter] = useState('Normal');
@@ -69,12 +82,20 @@ export default function StudioEditorView({ photos = [], onNext }) {
   const VIDEO_FILTERS = ['Normal', 'B&W', 'Sepia', 'Negative', 'Blur'];
 
   const [selectedSlot, setSelectedSlot] = useState(0);
-  const [slots, setSlots] = useState([
-    { photoIdx: 0, ...defaultTransform },
-    { photoIdx: 1, ...defaultTransform },
-    { photoIdx: 2, ...defaultTransform },
-    { photoIdx: 3, ...defaultTransform }
-  ]);
+  const [slots, setSlots] = useState(() => {
+    return Array.from({ length: 4 }, (_, i) => ({ photoIdx: i, ...defaultTransform }));
+  });
+
+  const hasFrameSlots = activeFrame.slots && Array.isArray(activeFrame.slots) && activeFrame.slots.length > 0;
+
+  // Auto-sync slot count & auto-fill photos when frame or layout changes
+  useEffect(() => {
+    const nextSlotCount = activeFrame.slots && Array.isArray(activeFrame.slots) && activeFrame.slots.length > 0
+      ? activeFrame.slots.length
+      : selectedLayout.count;
+    setSlots(Array.from({ length: nextSlotCount }, (_, i) => ({ photoIdx: i, ...defaultTransform })));
+    setSelectedSlot(0);
+  }, [activeFrame, selectedLayout]);
 
   const [gifFrame, setGifFrame] = useState(0);
 
@@ -105,11 +126,24 @@ export default function StudioEditorView({ photos = [], onNext }) {
   };
 
   const handleFinish = () => {
+    const frameConfig = hasFrameSlots ? {
+      frameImage: activeFrame.frameImage || activeFrame.url,
+      width: activeFrame.width || 1080,
+      height: activeFrame.height || 1920,
+      background: activeFrame.background || '#fffdf8',
+      slots: activeFrame.slots,
+    } : null;
+
     onNext({
       variants: [{
-        template: PHOTO_MODES[1] || { id: 'strip', count: 4 }, 
+        template: hasFrameSlots
+          ? { id: `custom-${activeFrame.slots.length}`, count: activeFrame.slots.length, type: 'custom' }
+          : selectedLayout, 
+        paperSize: selectedPaperSize,
         frame: activeFrame,
-        photos: photos // Ideally, pass transformed photos or config
+        frameConfig,
+        slotState: slots,
+        photos: availablePhotos
       }],
       upsellPrice: 0
     });
@@ -133,10 +167,15 @@ export default function StudioEditorView({ photos = [], onNext }) {
     });
   };
 
-  const thumbnailSlots = Array.from({ length: 5 });
+  // Keep the editor aligned to the selected frame. Extra captured poses stay out
+  // of the print layout when the frame has fewer photo holes.
+  const slotCount = hasFrameSlots ? activeFrame.slots.length : selectedLayout.count;
+  const availablePhotos = (photos || []).slice(0, 8);
+  const thumbnailSlots = Array.from({ length: 8 });
 
-  const allFrames = photos ? photos.reduce((acc, p) => p.frames ? acc.concat(p.frames) : acc.concat([p.src]), []) : [];
+  const allFrames = availablePhotos.reduce((acc, p) => p.frames ? acc.concat(p.frames) : acc.concat([p.src]), []);
   const currentVideoFrameSrc = allFrames.length > 0 ? allFrames[gifFrame % allFrames.length] : '';
+  const hasActiveFrameSlots = hasFrameSlots;
 
   const btnStyle = {
     background: 'transparent',
@@ -171,7 +210,7 @@ export default function StudioEditorView({ photos = [], onNext }) {
           </div>
         ) : (
           thumbnailSlots.map((_, idx) => {
-            const photo = photos && photos[idx];
+            const photo = availablePhotos[idx];
             return (
               <div 
                 key={idx} 
@@ -241,36 +280,65 @@ export default function StudioEditorView({ photos = [], onNext }) {
           <div className={`frame-${activeFrame.id}`} style={{
           width: '100%',
           maxWidth: '300px',
-          aspectRatio: '1/3', // typical photostrip aspect ratio
-          background: activeFrame.tone || '#fff',
-          border: `8px solid ${activeFrame.tone || '#fff'}`,
+          aspectRatio: hasActiveFrameSlots
+            ? `${activeFrame.width || 1080} / ${activeFrame.height || 1920}`
+            : '1/3',
+          background: activeFrame.id.startsWith('custom_')
+            ? (activeFrame.background || '#fffdf8')
+            : (activeFrame.tone || '#fff'),
+          border: activeFrame.id.startsWith('custom_')
+            ? 'none'
+            : `8px solid ${activeFrame.tone || '#fff'}`,
           borderRadius: '8px',
-          display: 'flex',
+          display: hasActiveFrameSlots ? 'block' : 'flex',
           flexDirection: 'column',
           alignItems: 'center',
           boxShadow: '0 20px 50px rgba(0,0,0,0.5)',
-          position: 'relative'
+          position: 'relative',
+          overflow: 'hidden'
         }}>
-           <div style={{ flex: '0 0 60px', display: 'flex', alignItems: 'center', justifyContent: 'center', width: '100%' }}>
-              <h4 style={{ margin: 0, fontSize: '1.5rem', fontFamily: 'serif', color: activeFrame.accent || '#333' }}>CAMERA</h4>
-           </div>
+           {/* Header for Default Frames */}
+           {!activeFrame.id.startsWith('custom_') && (
+             <div style={{ flex: '0 0 60px', display: 'flex', alignItems: 'center', justifyContent: 'center', width: '100%' }}>
+                <h4 style={{ margin: 0, fontSize: '1.5rem', fontFamily: 'serif', color: activeFrame.accent || '#333' }}>CAMERA</h4>
+             </div>
+           )}
            
-           <div style={{ flex: 1, width: '100%', display: 'flex', flexDirection: 'column', gap: '8px' }}>
-             {slots.map((slot, i) => {
+           {hasActiveFrameSlots ? (
+             // --- ABSOLUTE SLOTS (CUSTOM FIGMA TEMPLATES) ---
+             activeFrame.slots.map((slotConfig, i) => {
+               // Calculate percentages relative to customFrame base dimensions
+               const fWidth = activeFrame.width || 1080;
+               const fHeight = activeFrame.height || 1920;
+               
+               const slotStyle = {
+                 position: 'absolute',
+                 left: `${(slotConfig.x / fWidth) * 100}%`,
+                 top: `${(slotConfig.y / fHeight) * 100}%`,
+                 width: `${(slotConfig.width / fWidth) * 100}%`,
+                 height: `${(slotConfig.height / fHeight) * 100}%`,
+                 borderRadius: slotConfig.borderRadius ? `${slotConfig.borderRadius}px` : '0',
+                 overflow: 'hidden',
+               };
+               
+               // Use standard slot state mapping
+               const stateSlot = slots[i] || slots[0];
                const isSelected = selectedSlot === i && (step === 'edit_photo' || step === 'filter_photo');
                
-               let photo = null;
-               if (slot.photoIdx !== null && photos && photos.length > 0) {
-                 const basePhoto = photos[slot.photoIdx];
-                 if (step === 'edit_video' && basePhoto.frames && basePhoto.frames.length > 0) {
-                   const frameIdx = gifFrame % basePhoto.frames.length;
-                   photo = { ...basePhoto, src: basePhoto.frames[frameIdx] };
-                 } else {
-                   photo = basePhoto;
-                 }
-               }
+	               let photo = null;
+	               if (stateSlot.photoIdx !== null && availablePhotos.length > 0) {
+	                 const basePhoto = availablePhotos[stateSlot.photoIdx];
+	                 if (basePhoto) {
+	                   if (step === 'edit_video' && basePhoto.frames && basePhoto.frames.length > 0) {
+	                     const frameIdx = gifFrame % basePhoto.frames.length;
+	                     photo = { ...basePhoto, src: basePhoto.frames[frameIdx] };
+	                   } else {
+	                     photo = basePhoto;
+	                   }
+	                 }
+	               }
                
-               let staticFilter = getMockCssFilter(slot.filter || 'ORIGINAL');
+               let staticFilter = getMockCssFilter(stateSlot.filter || 'ORIGINAL');
                if (staticFilter === 'none') staticFilter = '';
                
                let vidFilter = step === 'edit_video' && videoFilter !== 'Normal' ? getMockCssFilter(videoFilter) : '';
@@ -286,15 +354,15 @@ export default function StudioEditorView({ photos = [], onNext }) {
                      setSelectedSlot(i);
                    }}
                    style={{
-                     flex: 1,
+                     ...slotStyle,
                      background: '#d1d5db',
                      border: isSelected ? '4px solid #3b82f6' : 'none',
                      cursor: (step === 'choose_frame' || step === 'edit_video') ? 'default' : 'pointer',
                      overflow: 'hidden',
-                     position: 'relative',
                      display: 'flex',
                      alignItems: 'center',
-                     justifyContent: 'center'
+                     justifyContent: 'center',
+                     zIndex: 5
                    }}
                  >
                    {photo ? (
@@ -306,7 +374,7 @@ export default function StudioEditorView({ photos = [], onNext }) {
                          objectFit: 'cover',
                          filter: combinedFilter,
                          transition: step === 'edit_video' ? 'none' : 'filter 0.3s, transform 0.3s',
-                         transform: `translate(${slot.x}px, ${slot.y}px) scale(${slot.zoom}) rotate(${slot.rotate}deg) scaleX(${slot.flipH ? -1 : 1}) scaleY(${slot.flipV ? -1 : 1})`
+                         transform: `translate(${stateSlot.x}px, ${stateSlot.y}px) scale(${stateSlot.zoom}) rotate(${stateSlot.rotate}deg) scaleX(${stateSlot.flipH ? -1 : 1}) scaleY(${stateSlot.flipV ? -1 : 1})`
                        }}
                      />
                    ) : (
@@ -314,12 +382,105 @@ export default function StudioEditorView({ photos = [], onNext }) {
                    )}
                  </div>
                )
-             })}
-           </div>
+             })
+           ) : (
+             // --- GRID SLOTS (DEFAULT LAYOUT) ---
+             <>
+	               <div style={{
+	                 flex: 1,
+	                 width: '100%',
+	                 display: 'grid',
+	                 gridTemplateColumns: `repeat(${selectedLayout.columns || 1}, minmax(0, 1fr))`,
+	                 gridTemplateRows: `repeat(${Math.ceil(slotCount / (selectedLayout.columns || 1))}, minmax(0, 1fr))`,
+	                 gap: activeFrame.id.startsWith('custom_') ? '0' : '8px'
+	               }}>
+                 {slots.map((slot, i) => {
+                   const isSelected = selectedSlot === i && (step === 'edit_photo' || step === 'filter_photo');
+                   
+	                   let photo = null;
+	                   if (slot.photoIdx !== null && availablePhotos.length > 0) {
+	                     const basePhoto = availablePhotos[slot.photoIdx];
+	                     if (basePhoto) {
+	                       if (step === 'edit_video' && basePhoto.frames && basePhoto.frames.length > 0) {
+	                         const frameIdx = gifFrame % basePhoto.frames.length;
+	                         photo = { ...basePhoto, src: basePhoto.frames[frameIdx] };
+	                       } else {
+	                         photo = basePhoto;
+	                       }
+	                     }
+	                   }
+                   
+                   let staticFilter = getMockCssFilter(slot.filter || 'ORIGINAL');
+                   if (staticFilter === 'none') staticFilter = '';
+                   
+                   let vidFilter = step === 'edit_video' && videoFilter !== 'Normal' ? getMockCssFilter(videoFilter) : '';
+                   if (vidFilter === 'none') vidFilter = '';
+                   
+                   const combinedFilter = `${staticFilter} ${vidFilter}`.trim() || 'none';
 
-           <div style={{ flex: '0 0 40px', display: 'flex', alignItems: 'center', justifyContent: 'center', width: '100%' }}>
-              <span style={{ fontSize: '0.6rem', color: activeFrame.accent || '#666' }}>{activeFrame.name}</span>
-           </div>
+                   return (
+                     <div 
+                       key={i}
+                       onClick={() => {
+                         if (step === 'choose_frame' || step === 'edit_video') return;
+                         setSelectedSlot(i);
+                       }}
+	                       style={{
+	                         background: '#d1d5db',
+                         border: isSelected ? '4px solid #3b82f6' : 'none',
+                         cursor: (step === 'choose_frame' || step === 'edit_video') ? 'default' : 'pointer',
+                         overflow: 'hidden',
+                         position: 'relative',
+                         display: 'flex',
+                         alignItems: 'center',
+                         justifyContent: 'center'
+                       }}
+                     >
+                       {photo ? (
+                         <img 
+                           src={photo.src} 
+                           style={{
+                             width: '100%',
+                             height: '100%',
+                             objectFit: 'cover',
+                             filter: combinedFilter,
+                             transition: step === 'edit_video' ? 'none' : 'filter 0.3s, transform 0.3s',
+                             transform: `translate(${slot.x}px, ${slot.y}px) scale(${slot.zoom}) rotate(${slot.rotate}deg) scaleX(${slot.flipH ? -1 : 1}) scaleY(${slot.flipV ? -1 : 1})`
+                           }}
+                         />
+                       ) : (
+                         <span style={{ fontSize: '2rem', color: '#fff', fontWeight: 'bold' }}>{i + 1}</span>
+                       )}
+                     </div>
+                   )
+                 })}
+               </div>
+
+               {/* Footer for Default Frames */}
+               {!activeFrame.id.startsWith('custom_') && (
+                 <div style={{ flex: '0 0 40px', display: 'flex', alignItems: 'center', justifyContent: 'center', width: '100%' }}>
+                    <span style={{ fontSize: '0.6rem', color: activeFrame.accent || '#666' }}>{activeFrame.name}</span>
+                 </div>
+               )}
+             </>
+           )}
+            
+            {/* PNG Overlay for custom frames — sits on TOP of the photos */}
+            {activeFrame.id.startsWith('custom_') && (
+              <div style={{
+                position: 'absolute',
+                top: 0,
+                left: 0,
+                right: 0,
+                bottom: 0,
+                backgroundImage: `url(${activeFrame.url})`,
+                backgroundSize: '100% 100%',
+                backgroundRepeat: 'no-repeat',
+                zIndex: 10,
+                pointerEvents: 'none'
+              }} />
+            )}
+           
            {step === 'edit_video' && (
              <div style={{ position: 'absolute', top: -15, right: -15, background: '#ef4444', color: 'white', padding: '4px 8px', borderRadius: '4px', fontSize: '0.7rem', fontWeight: 'bold', zIndex: 10 }}>
                GIF PREVIEW
@@ -349,12 +510,76 @@ export default function StudioEditorView({ photos = [], onNext }) {
               <span style={{ cursor: 'pointer', color: activeCategory === 'Baru' ? 'white' : '#9ca3af' }} onClick={() => setActiveCategory('Baru')}>Baru</span>
               <span style={{ cursor: 'pointer', color: activeCategory === 'Trending' ? 'white' : '#9ca3af' }} onClick={() => setActiveCategory('Trending')}>Trending</span>
               <span style={{ cursor: 'pointer', color: activeCategory === 'Sering Dipakai' ? 'white' : '#9ca3af', whiteSpace: 'nowrap' }} onClick={() => setActiveCategory('Sering Dipakai')}>Sering Dipakai</span>
-            </div>
+	            </div>
 
-            {/* Frames Grid */}
-            <div style={{ flex: 1, overflowY: 'auto', paddingRight: '0.5rem', marginBottom: '1.5rem' }}>
+	            <div style={{ display: 'grid', gap: '1rem', marginBottom: '1.25rem', flexShrink: 0 }}>
+	              <div>
+	                <div style={{ fontSize: '0.72rem', color: '#9ca3af', fontWeight: 'bold', marginBottom: '0.6rem' }}>LAYOUT</div>
+	                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '0.5rem' }}>
+	                  {PHOTO_MODES.map((mode) => {
+	                    const isSelected = !hasFrameSlots && selectedLayout.id === mode.id;
+	                    return (
+	                      <button
+	                        key={mode.id}
+	                        type="button"
+	                        onClick={() => setSelectedLayout(mode)}
+	                        disabled={hasFrameSlots}
+	                        style={{
+	                          minHeight: '44px',
+	                          borderRadius: '8px',
+	                          background: isSelected ? 'white' : '#1f2937',
+	                          color: isSelected ? '#111827' : '#e5e7eb',
+	                          border: isSelected ? 'none' : '1px solid #374151',
+	                          fontWeight: 'bold',
+	                          fontSize: '0.78rem',
+	                          cursor: hasFrameSlots ? 'not-allowed' : 'pointer',
+	                          opacity: hasFrameSlots ? 0.45 : 1
+	                        }}
+	                      >
+	                        {mode.count}
+	                      </button>
+	                    );
+	                  })}
+	                </div>
+	                {hasFrameSlots && (
+	                  <div style={{ marginTop: '0.55rem', color: '#fbbf24', fontSize: '0.72rem', fontWeight: 'bold' }}>
+	                    Frame ini memakai {activeFrame.slots.length} slot foto
+	                  </div>
+	                )}
+	              </div>
+
+	              <div>
+	                <div style={{ fontSize: '0.72rem', color: '#9ca3af', fontWeight: 'bold', marginBottom: '0.6rem' }}>UKURAN KERTAS</div>
+	                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: '0.5rem' }}>
+	                  {PAPER_SIZES.map((paper) => {
+	                    const isSelected = selectedPaperSize.id === paper.id;
+	                    return (
+	                      <button
+	                        key={paper.id}
+	                        type="button"
+	                        onClick={() => setSelectedPaperSize(paper)}
+	                        style={{
+	                          minHeight: '44px',
+	                          borderRadius: '8px',
+	                          background: isSelected ? 'white' : '#1f2937',
+	                          color: isSelected ? '#111827' : '#e5e7eb',
+	                          border: isSelected ? 'none' : '1px solid #374151',
+	                          fontWeight: 'bold',
+	                          cursor: 'pointer'
+	                        }}
+	                      >
+	                        {paper.name}
+	                      </button>
+	                    );
+	                  })}
+	                </div>
+	              </div>
+	            </div>
+
+	            {/* Frames Grid */}
+	            <div style={{ flex: 1, overflowY: 'auto', paddingRight: '0.5rem', marginBottom: '1.5rem' }}>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
-                {FRAMES.map((frame, idx) => {
+                {availableFrames.map((frame, idx) => {
                   const isSelected = activeFrame.id === frame.id;
                   return (
                     <div 
@@ -379,12 +604,18 @@ export default function StudioEditorView({ photos = [], onNext }) {
                         overflow: 'hidden'
                       }}
                     >
-                      <div style={{ width: '80%', height: '60%', background: 'rgba(0,0,0,0.1)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '1.5rem', fontWeight: 'bold', color: 'rgba(0,0,0,0.3)', zIndex: 5 }}>
-                        1
-                      </div>
-                      <span style={{ fontSize: '0.7rem', fontWeight: 'bold', textAlign: 'center', marginTop: '0.5rem', color: frame.accent, zIndex: 5 }}>
-                        {frame.name}
-                      </span>
+                      {frame.id.startsWith('custom_') ? (
+                         <div style={{ width: '100%', height: '100%', backgroundImage: `url(${frame.url})`, backgroundSize: 'contain', backgroundPosition: 'center', backgroundRepeat: 'no-repeat', zIndex: 5 }} />
+                      ) : (
+                        <>
+                          <div style={{ width: '80%', height: '60%', background: 'rgba(0,0,0,0.1)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '1.5rem', fontWeight: 'bold', color: 'rgba(0,0,0,0.3)', zIndex: 5 }}>
+                            1
+                          </div>
+                          <span style={{ fontSize: '0.7rem', fontWeight: 'bold', textAlign: 'center', marginTop: '0.5rem', color: frame.accent, zIndex: 5 }}>
+                            {frame.name}
+                          </span>
+                        </>
+                      )}
                     </div>
                   );
                 })}
@@ -515,7 +746,7 @@ export default function StudioEditorView({ photos = [], onNext }) {
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '1rem' }}>
                 {FILTER_CATEGORIES[filterCategory].map((filterName) => {
                   const isSelected = currentSlot.filter === filterName || (!currentSlot.filter && filterName === 'ORIGINAL');
-                  const photoSrc = (currentSlot.photoIdx !== null && photos[currentSlot.photoIdx]) ? photos[currentSlot.photoIdx].src : null;
+	                  const photoSrc = (currentSlot.photoIdx !== null && availablePhotos[currentSlot.photoIdx]) ? availablePhotos[currentSlot.photoIdx].src : null;
                   
                   return (
                     <div 
@@ -623,7 +854,7 @@ export default function StudioEditorView({ photos = [], onNext }) {
                 {FILTER_CATEGORIES.ESSENTIAL.map(flt => (
                   <div key={flt} onClick={() => setVideoSettings(s => ({...s, filter: flt}))} style={{ cursor: 'pointer', flexShrink: 0, width: '60px', display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
                     <div style={{ width: '100%', aspectRatio: '1/1', background: '#374151', borderRadius: '4px', border: videoSettings.filter === flt ? '2px solid white' : '2px solid transparent', overflow: 'hidden' }}>
-                       <img src={photos && photos[0] ? photos[0].src : ''} style={{ width: '100%', height: '100%', objectFit: 'cover', filter: getMockCssFilter(flt) }} />
+	                       <img src={availablePhotos[0] ? availablePhotos[0].src : ''} style={{ width: '100%', height: '100%', objectFit: 'cover', filter: getMockCssFilter(flt) }} />
                     </div>
                     <span style={{ fontSize: '0.5rem', color: videoSettings.filter === flt ? 'white' : '#9ca3af', textAlign: 'center', fontWeight: 'bold', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{flt}</span>
                   </div>

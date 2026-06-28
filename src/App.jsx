@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import LandingPage from './components/LandingPage.jsx';
 import PackageTierView from './components/PackageTierView.jsx';
 import HeadcountView from './components/HeadcountView.jsx';
@@ -23,6 +23,15 @@ const STEPS = {
   LIVE_WALL_SHARE: 'LIVE_WALL_SHARE',
   THANK_YOU: 'THANK_YOU',
 };
+
+const SESSION_DURATION_MS = 5 * 60 * 1000;
+
+function formatRemainingTime(milliseconds) {
+  const totalSeconds = Math.max(0, Math.ceil(milliseconds / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes}:${String(seconds).padStart(2, '0')}`;
+}
 
 export default function App() {
   // Simple router for client gallery and admin
@@ -57,6 +66,28 @@ export default function App() {
 
   const [capturedPhotos, setCapturedPhotos] = useState([]);
   const [selectedPhotos, setSelectedPhotos] = useState([]);
+  const [sessionExpiresAt, setSessionExpiresAt] = useState(null);
+  const [remainingSessionMs, setRemainingSessionMs] = useState(SESSION_DURATION_MS);
+  const [backendSession, setBackendSession] = useState(null);
+  const [backendPayment, setBackendPayment] = useState(null);
+
+  useEffect(() => {
+    if (!sessionExpiresAt) return undefined;
+
+    const updateRemaining = () => {
+      const remaining = sessionExpiresAt - Date.now();
+      if (remaining <= 0) {
+        setRemainingSessionMs(0);
+        resetApp();
+        return;
+      }
+      setRemainingSessionMs(remaining);
+    };
+
+    updateRemaining();
+    const timerId = window.setInterval(updateRemaining, 1000);
+    return () => window.clearInterval(timerId);
+  }, [sessionExpiresAt]);
 
   const resetApp = () => {
     setCurrentStep(STEPS.IDLE);
@@ -74,6 +105,18 @@ export default function App() {
     });
     setCapturedPhotos([]);
     setSelectedPhotos([]);
+    setSessionExpiresAt(null);
+    setRemainingSessionMs(SESSION_DURATION_MS);
+    setBackendSession(null);
+    setBackendPayment(null);
+  };
+
+  const startTimedSession = ({ session, payment } = {}) => {
+    setBackendSession(session || null);
+    setBackendPayment(payment || null);
+    setSessionExpiresAt(Date.now() + SESSION_DURATION_MS);
+    setRemainingSessionMs(SESSION_DURATION_MS);
+    setCurrentStep(STEPS.CAMERA);
   };
 
   const renderStep = () => {
@@ -118,7 +161,7 @@ export default function App() {
           <PaymentView
             title="Mulai Sesi Photobooth"
             orderDetails={orderDetails}
-            onPaymentSuccess={() => setCurrentStep(STEPS.CAMERA)}
+            onPaymentSuccess={startTimedSession}
             onBack={() => setCurrentStep(STEPS.IDLE)}
             showFeatures={true}
           />
@@ -128,7 +171,7 @@ export default function App() {
         return (
           <CameraView
             filter={orderDetails.filter}
-            poseLimit={5}
+            poseLimit={8}
             onFinishSession={(photos) => {
               setCapturedPhotos(photos);
               setCurrentStep(STEPS.STUDIO_EDITOR);
@@ -142,11 +185,19 @@ export default function App() {
             photos={capturedPhotos}
             onNext={(result) => {
               const upsellItems = result.upsellPrice > 0 ? [{ name: `Tambah ${result.variants.length - 1} Varian Cetak`, price: result.upsellPrice }] : [];
+              const firstVariant = result.variants?.[0];
+              setOrderDetails(prev => ({
+                ...prev,
+                layoutId: firstVariant?.template?.id,
+                paperSize: firstVariant?.paperSize?.id,
+                frameId: firstVariant?.frame?.id,
+              }));
               setUpsellDetails({
                 variants: result.variants,
                 upsellPrice: result.upsellPrice,
                 upsellItems
               });
+              setSessionExpiresAt(null);
 
               if (result.upsellPrice > 0) {
                 setCurrentStep(STEPS.PAYMENT_2);
@@ -163,10 +214,14 @@ export default function App() {
             title="Pembayaran Tambahan (Upsell)"
             description="Anda menambahkan frame/template premium. Silakan selesaikan pembayaran."
             orderDetails={{
+              backendSession,
               totalPrice: upsellDetails.upsellPrice,
               upsellDetails: upsellDetails.upsellItems
             }}
-            onPaymentSuccess={() => setCurrentStep(STEPS.LIVE_WALL_SHARE)}
+            onPaymentSuccess={({ payment } = {}) => {
+              if (payment) setBackendPayment(payment);
+              setCurrentStep(STEPS.LIVE_WALL_SHARE);
+            }}
             onBack={() => setCurrentStep(STEPS.UPSELL)}
           />
         );
@@ -177,6 +232,8 @@ export default function App() {
             orderDetails={orderDetails}
             upsellDetails={upsellDetails}
             capturedPhotos={capturedPhotos}
+            backendSession={backendSession}
+            backendPayment={backendPayment}
             onNext={() => setCurrentStep(STEPS.THANK_YOU)}
           />
         );
@@ -205,6 +262,23 @@ export default function App() {
           <span className="brand-mark">up</span>
           <span>Urbanmenphoto</span>
         </button>
+        {sessionExpiresAt ? (
+          <div style={{
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: '0.5rem',
+            border: '1px solid var(--line)',
+            borderRadius: '999px',
+            padding: '0.55rem 0.9rem',
+            background: remainingSessionMs <= 30000 ? '#fee2e2' : 'rgba(255,255,255,0.78)',
+            color: remainingSessionMs <= 30000 ? '#991b1b' : 'var(--ink)',
+            fontWeight: 900,
+            fontVariantNumeric: 'tabular-nums'
+          }}>
+            <span>Sisa sesi</span>
+            <span>{formatRemainingTime(remainingSessionMs)}</span>
+          </div>
+        ) : null}
       </header>
 
       {renderStep()}

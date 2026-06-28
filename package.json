@@ -5,6 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite --host",
+    "backend:dev": "cd backend && go run ./cmd/api",
+    "backend:admin": "cd backend && go run ./cmd/admin",
     "build": "vite build",
     "preview": "vite preview",
     "start": "node scripts/pm2-start.cjs",

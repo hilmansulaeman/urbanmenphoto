@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
-import { supabase } from '../utils/supabaseClient';
 import { QRCodeSVG } from 'qrcode.react';
+import { backendRequest } from '../utils/backendApi.js';
 
 const OriginalSnapItem = ({ url, staticUrl, label, isGifFile, idx, downloadImage, onItemClick }) => {
   const [isHovered, setIsHovered] = useState(false);
@@ -63,23 +63,33 @@ export default function MobileGalleryView({ sessionId }) {
 
   useEffect(() => {
     async function fetchGallery() {
-      if (!supabase) {
-        setError('Koneksi Supabase belum dikonfigurasi.');
-        setLoading(false);
+      if (sessionId?.startsWith('local-')) {
+        try {
+          const storedSession = window.localStorage.getItem(`potobox_gallery_${sessionId}`);
+          if (!storedSession) throw new Error('Galeri lokal tidak ditemukan. Selesaikan sesi foto dulu di browser yang sama.');
+          setSessionData(JSON.parse(storedSession));
+        } catch (err) {
+          console.error('Error fetching local gallery:', err);
+          setError(err.message || 'Gagal memuat galeri lokal.');
+        } finally {
+          setLoading(false);
+        }
         return;
       }
 
       try {
-        const { data, error } = await supabase
-          .from('sessions')
-          .select('*')
-          .eq('id', sessionId)
-          .single();
-
-        if (error) throw error;
+        const data = await backendRequest(`/api/galleries/${sessionId}`);
         if (!data) throw new Error('Sesi foto tidak ditemukan.');
 
-        setSessionData(data);
+        const imageUrls = [
+          data.finalImage?.url,
+          ...(data.images || []),
+        ].filter(Boolean);
+        setSessionData({
+          ...data,
+          id: data.sessionId,
+          images: Array.from(new Set(imageUrls)),
+        });
       } catch (err) {
         console.error('Error fetching gallery:', err);
         setError(err.message || 'Gagal memuat galeri foto.');
@@ -132,8 +142,8 @@ export default function MobileGalleryView({ sessionId }) {
 
   const isVideoOrGif = (url) => url.toLowerCase().includes('.gif') || url.toLowerCase().includes('.mp4');
 
-  const variants = sessionData?.images?.filter(url => url.includes('/variant-')) || [];
-  const originals = sessionData?.images?.filter(url => url.includes('/original-')) || [];
+  const variants = sessionData?.images?.filter(url => url.includes('/variant-') || url.includes('/final-print')) || [];
+  const originals = sessionData?.images?.filter(url => url.includes('/original-') || url.includes('/image-')) || [];
   
   const displayVariants = variants.length > 0 ? variants : (sessionData?.images?.slice(0, 2) || []);
   const displayOriginals = (originals.length > 0 ? originals : (sessionData?.images?.slice(2) || []))
