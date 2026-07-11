@@ -7,7 +7,7 @@ const OriginalSnapItem = ({ url, staticUrl, label, isGifFile, idx, downloadImage
 
   return (
     <div 
-      style={{ position: 'relative', borderRadius: '16px', overflow: 'hidden', aspectRatio: '4/3', boxShadow: '0 10px 20px rgba(0,0,0,0.1)', cursor: 'pointer' }}
+      style={{ position: 'relative', borderRadius: '18px', overflow: 'hidden', aspectRatio: '4/3', boxShadow: '0 18px 35px rgba(15, 23, 42, 0.12)', cursor: 'pointer', background: '#f8fafc', border: '1px solid #f1f5f9' }}
       onMouseEnter={() => setIsHovered(true)}
       onMouseLeave={() => setIsHovered(false)}
       onTouchStart={() => setIsHovered(true)}
@@ -28,7 +28,7 @@ const OriginalSnapItem = ({ url, staticUrl, label, isGifFile, idx, downloadImage
        )}
        
        {/* Top Left Label Pill */}
-       <div style={{ position: 'absolute', top: '12px', left: '12px', background: 'rgba(0,0,0,0.4)', color: 'white', padding: '0.2rem 0.6rem', borderRadius: '999px', fontSize: '0.65rem', fontWeight: 'bold', letterSpacing: '1px', pointerEvents: 'none', zIndex: 3 }}>
+       <div style={{ position: 'absolute', top: '12px', left: '12px', background: 'rgba(15, 23, 42, 0.68)', color: 'white', padding: '0.25rem 0.65rem', borderRadius: '999px', fontSize: '0.65rem', fontWeight: 'bold', letterSpacing: '1px', pointerEvents: 'none', zIndex: 3, backdropFilter: 'blur(8px)' }}>
          {label}
        </div>
 
@@ -43,7 +43,7 @@ const OriginalSnapItem = ({ url, staticUrl, label, isGifFile, idx, downloadImage
 
        {/* Small Download Button */}
        <div style={{ position: 'absolute', bottom: '15px', left: '50%', transform: 'translateX(-50%)', zIndex: 4 }}>
-         <button onClick={(e) => { e.stopPropagation(); downloadImage(url, isGifFile ? `original-${idx + 1}.gif` : `original-${idx + 1}.png`); }} style={{ background: 'white', border: 'none', width: '32px', height: '32px', borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', boxShadow: '0 4px 10px rgba(0,0,0,0.2)' }}>
+         <button onClick={(e) => { e.stopPropagation(); downloadImage(url, isGifFile ? `original-${idx + 1}.gif` : `original-${idx + 1}.png`); }} style={{ background: 'white', border: 'none', width: '34px', height: '34px', borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', boxShadow: '0 8px 20px rgba(15,23,42,0.22)' }}>
            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#1f2937" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
               <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
               <polyline points="7 10 12 15 17 10" />
@@ -82,7 +82,9 @@ export default function MobileGalleryView({ sessionId }) {
         if (!data) throw new Error('Sesi foto tidak ditemukan.');
 
         const imageUrls = [
+          data.animatedImage?.url,
           data.finalImage?.url,
+          data.printImage?.url,
           ...(data.images || []),
         ].filter(Boolean);
         setSessionData({
@@ -102,18 +104,14 @@ export default function MobileGalleryView({ sessionId }) {
   }, [sessionId]);
 
   const handleDownloadAll = () => {
-    if (!sessionData?.images) return;
-    
-    // Iterasi untuk mendownload secara lokal
-    sessionData.images.forEach((imgUrl, idx) => {
-      // Buka di tab baru atau paksa download menggunakan tag a
-      const a = document.createElement('a');
-      a.href = imgUrl;
-      a.target = '_blank';
-      a.download = `potobox-${sessionId}-${idx + 1}.png`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
+    if (!sessionData?.images?.length) return;
+
+    Array.from(new Set(sessionData.images)).forEach((imgUrl, idx) => {
+      const isMoving = isVideoOrGif(imgUrl);
+      const extension = isMoving ? 'gif' : 'png';
+      window.setTimeout(() => {
+        downloadImage(imgUrl, `urbanmenphoto-${sessionId}-${idx + 1}.${extension}`);
+      }, idx * 180);
     });
   };
 
@@ -157,6 +155,7 @@ export default function MobileGalleryView({ sessionId }) {
   // Find the combined GIF, fallback to first GIF/video, then fallback to first original
   const combinedGifUrl = sessionData?.images?.find(url => url.includes('featured-video.gif'));
   const featuredVideoUrl = combinedGifUrl || displayOriginals.find(isVideoOrGif) || displayOriginals[0];
+  const totalImages = sessionData?.images?.length || 0;
 
   const downloadImage = (url, filename) => {
     const a = document.createElement('a');
@@ -169,29 +168,46 @@ export default function MobileGalleryView({ sessionId }) {
   };
 
   return (
-    <div style={{ minHeight: '100vh', background: '#fcfaf6', fontFamily: 'sans-serif', color: '#1f2937' }}>
+    <div style={{ minHeight: '100vh', background: '#fffaf2', fontFamily: 'sans-serif', color: '#1f2937' }}>
       
       {/* Header */}
-      <header style={{ padding: '1.2rem 2rem', display: 'flex', alignItems: 'center', gap: '0.8rem', background: '#fff', borderBottom: '1px solid #f3f4f6' }}>
-        <div style={{ background: '#f97316', color: 'white', width: '32px', height: '32px', borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 'bold', fontSize: '0.9rem' }}>up</div>
-        <span style={{ color: '#f97316', fontWeight: '800', fontSize: '1.2rem', fontFamily: 'sans-serif' }}>Urbanmenphoto</span>
+      <header style={{ background: 'rgba(255,255,255,0.9)', borderBottom: '1px solid #fed7aa', position: 'sticky', top: 0, zIndex: 20, backdropFilter: 'blur(14px)' }}>
+        <div style={{ maxWidth: '1120px', margin: '0 auto', padding: '1rem 1.25rem', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '1rem' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.8rem' }}>
+            <div style={{ background: '#f97316', color: 'white', width: '34px', height: '34px', borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 'bold', fontSize: '0.9rem', boxShadow: '0 8px 18px rgba(249,115,22,0.25)' }}>up</div>
+            <span style={{ color: '#f97316', fontWeight: '900', fontSize: '1.12rem', fontFamily: 'sans-serif' }}>Urbanmenphoto</span>
+          </div>
+          <div style={{ color: '#64748b', fontSize: '0.82rem', fontWeight: 800 }}>
+            {totalImages ? `${totalImages} file siap` : 'Menunggu hasil'}
+          </div>
+        </div>
       </header>
 
       {/* Hero Title */}
-      <div style={{ textAlign: 'center', margin: '4rem 1rem 3rem' }}>
-        <h1 style={{ fontSize: '3.5rem', fontWeight: '400', margin: '0 0 0.5rem', color: '#1f2937', letterSpacing: '-1px' }}>THANK YOU</h1>
-        <p style={{ color: '#9ca3af', fontSize: '1rem', margin: 0 }}>We hope you had fun! Here are your memories.</p>
+      <div style={{ textAlign: 'center', margin: '3.5rem auto 2.5rem', padding: '0 1.25rem', maxWidth: '760px' }}>
+        <div style={{ color: '#ea580c', fontSize: '0.78rem', fontWeight: 900, letterSpacing: '0.16em', textTransform: 'uppercase', marginBottom: '0.8rem' }}>Gallery Customer</div>
+        <h1 style={{ fontSize: 'clamp(2.4rem, 7vw, 4.5rem)', lineHeight: 1, fontWeight: '500', margin: '0 0 0.85rem', color: '#172033', letterSpacing: '0' }}>THANK YOU</h1>
+        <p style={{ color: '#64748b', fontSize: '1rem', margin: 0, lineHeight: 1.6 }}>Hasil foto Anda sudah siap dilihat dan diunduh.</p>
+        <button disabled={!sessionData?.images?.length} onClick={handleDownloadAll} style={{ marginTop: '1.6rem', background: sessionData?.images?.length ? '#f97316' : '#cbd5e1', color: 'white', border: 'none', padding: '0.95rem 1.8rem', borderRadius: '999px', fontSize: '0.98rem', fontWeight: '900', cursor: sessionData?.images?.length ? 'pointer' : 'not-allowed', boxShadow: sessionData?.images?.length ? '0 16px 34px rgba(249, 115, 22, 0.28)' : 'none' }}>
+          Download Semua Hasil
+        </button>
       </div>
 
       {/* Your Results Section */}
       <section style={{ padding: '0 1.5rem' }}>
-        <h2 style={{ textAlign: 'center', fontSize: '1.6rem', fontWeight: 'bold', margin: '0 0 2rem', color: '#1f2937' }}>Your Results</h2>
+        <h2 style={{ textAlign: 'center', fontSize: '1.45rem', fontWeight: '900', margin: '0 0 1.75rem', color: '#172033' }}>Your Results</h2>
+        {!sessionData?.images?.length && (
+          <div style={{ maxWidth: '560px', margin: '0 auto 3rem', padding: '1.4rem', borderRadius: '18px', border: '1px dashed #fdba74', background: '#fff7ed', color: '#c2410c', textAlign: 'center', fontWeight: 800, boxShadow: '0 14px 30px rgba(249,115,22,0.08)' }}>
+            <div style={{ fontSize: '1.05rem', marginBottom: '0.35rem' }}>Hasil foto belum tersimpan untuk sesi ini.</div>
+            <div style={{ color: '#9a3412', fontSize: '0.9rem', fontWeight: 700 }}>Silakan ulangi proses finalisasi foto dari photobooth.</div>
+          </div>
+        )}
 
         {/* Featured Large Image (Simulated Video) */}
         {featuredVideoUrl && (
           <div 
             onClick={() => setSelectedVideo(featuredVideoUrl)}
-            style={{ maxWidth: '800px', margin: '0 auto 3rem', position: 'relative', borderRadius: '16px', overflow: 'hidden', boxShadow: '0 20px 40px rgba(0,0,0,0.1)', cursor: 'pointer' }}
+            style={{ maxWidth: '900px', margin: '0 auto 3rem', position: 'relative', borderRadius: '22px', overflow: 'hidden', boxShadow: '0 24px 55px rgba(15,23,42,0.14)', cursor: 'pointer', background: '#111827', border: '1px solid rgba(15,23,42,0.08)' }}
           >
             <img src={featuredVideoUrl} style={{ width: '100%', display: 'block', aspectRatio: '16/9', objectFit: 'cover' }} alt="Featured Video" />
             
@@ -216,9 +232,10 @@ export default function MobileGalleryView({ sessionId }) {
         )}
 
         {/* Photostrips */}
-        <div style={{ position: 'relative', display: 'flex', justifyContent: 'center', gap: '10px', marginBottom: '5rem', maxWidth: '640px', margin: '0 auto 5rem' }}>
+        {displayVariants.length > 0 && (
+        <div style={{ position: 'relative', display: 'flex', justifyContent: 'center', gap: '14px', marginBottom: '5rem', maxWidth: '720px', margin: '0 auto 5rem' }}>
           {displayVariants.map((url, idx) => (
-            <div key={idx} style={{ flex: 1, borderRadius: '8px', overflow: 'hidden', boxShadow: '0 10px 30px rgba(0,0,0,0.1)' }}>
+            <div key={idx} style={{ flex: 1, borderRadius: '16px', overflow: 'hidden', boxShadow: '0 18px 42px rgba(15,23,42,0.12)', background: 'white', border: '1px solid #fff' }}>
               <img src={url} style={{ width: '100%', display: 'block' }} alt={`Variant ${idx}`} />
             </div>
           ))}
@@ -227,7 +244,7 @@ export default function MobileGalleryView({ sessionId }) {
           <div style={{ position: 'absolute', bottom: '-20px', left: '50%', transform: 'translateX(-50%)', zIndex: 10 }}>
              <button onClick={() => {
                displayVariants.forEach((url, idx) => downloadImage(url, `photostrip-${idx + 1}.png`))
-             }} style={{ background: 'white', color: 'black', border: '1px solid #e5e7eb', padding: '0.8rem 2rem', borderRadius: '999px', fontSize: '1rem', fontWeight: 'bold', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '0.5rem', boxShadow: '0 10px 25px rgba(0,0,0,0.15)' }}>
+             }} style={{ background: 'white', color: '#172033', border: '1px solid #fed7aa', padding: '0.8rem 2rem', borderRadius: '999px', fontSize: '1rem', fontWeight: '900', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '0.5rem', boxShadow: '0 14px 30px rgba(15,23,42,0.14)' }}>
                <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
                   <path d="M12 15L12 3M12 15L8 11M12 15L16 11" stroke="#ef4444" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"/>
                   <path d="M4 17L4 19C4 20.1046 4.89543 21 6 21L18 21C19.1046 21 20 20.1046 20 19L20 17" stroke="#3b82f6" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"/>
@@ -236,11 +253,12 @@ export default function MobileGalleryView({ sessionId }) {
              </button>
           </div>
         </div>
+        )}
       </section>
 
       {/* Original Snaps Section */}
       <section style={{ padding: '0 1.5rem 4rem' }}>
-        <h2 style={{ textAlign: 'center', fontSize: '1.1rem', fontWeight: 'bold', letterSpacing: '2px', margin: '0 0 2rem', color: '#1f2937', textTransform: 'uppercase' }}>Original Snaps</h2>
+        <h2 style={{ textAlign: 'center', fontSize: '1.05rem', fontWeight: '900', letterSpacing: '0.16em', margin: '0 0 2rem', color: '#172033', textTransform: 'uppercase' }}>Original Snaps</h2>
         
         <div style={{ maxWidth: '1000px', margin: '0 auto', display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '1.5rem' }}>
           {(() => {

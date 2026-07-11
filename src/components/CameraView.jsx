@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
-import { captureVideoFrame, getCameraStream } from '../utils/camera.js';
+import { captureVideoFrame, getCameraStream, stopStream } from '../utils/camera.js';
+import { getKioskSettings } from '../utils/kioskConfig.js';
 
 const RetakeIcon = () => (
   <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#6b7280" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ width: 18, height: 18 }}>
@@ -38,7 +39,8 @@ const DownloadIcon = () => (
 export default function CameraView({ filter, poseLimit = 5, onFinishSession }) {
   const videoRef = useRef(null);
   const streamRef = useRef(null);
-  const [facingMode, setFacingMode] = useState('user');
+  const [cameraSettings] = useState(() => getKioskSettings());
+  const [facingMode, setFacingMode] = useState(() => getKioskSettings().defaultCamera || 'user');
   const [isReady, setIsReady] = useState(false);
   const [error, setError] = useState('');
 
@@ -60,7 +62,10 @@ export default function CameraView({ filter, poseLimit = 5, onFinishSession }) {
       stopStream(streamRef.current);
 
       try {
-        const stream = await getCameraStream(facingMode);
+        const stream = await getCameraStream({
+          facingMode,
+          deviceId: cameraSettings.cameraDeviceId,
+        });
         if (cancelled) {
           stopStream(stream);
           return;
@@ -73,6 +78,26 @@ export default function CameraView({ filter, poseLimit = 5, onFinishSession }) {
           setIsReady(true);
         }
       } catch (cameraError) {
+        if (cameraSettings.cameraDeviceId) {
+          try {
+            const fallbackStream = await getCameraStream(facingMode);
+            if (cancelled) {
+              stopStream(fallbackStream);
+              return;
+            }
+            streamRef.current = fallbackStream;
+            if (videoRef.current) {
+              videoRef.current.srcObject = fallbackStream;
+              await videoRef.current.play();
+              setIsReady(true);
+              setError('');
+              return;
+            }
+          } catch (fallbackError) {
+            setError(fallbackError.message || 'Kamera tidak bisa diakses.');
+            return;
+          }
+        }
         setError(cameraError.message || 'Kamera tidak bisa diakses.');
       }
     }
@@ -83,7 +108,7 @@ export default function CameraView({ filter, poseLimit = 5, onFinishSession }) {
       cancelled = true;
       stopStream(streamRef.current);
     };
-  }, [facingMode]);
+  }, [facingMode, cameraSettings.cameraDeviceId]);
 
   const handleCaptureClick = () => {
     if (!videoRef.current || !isReady || isRecordingBurst || countdown !== null) return;
@@ -105,7 +130,7 @@ export default function CameraView({ filter, poseLimit = 5, onFinishSession }) {
     // Capture 8 frames at 150ms intervals (~1.2 seconds of animation)
     const interval = setInterval(() => {
       if (videoRef.current) {
-        burstFrames.push(captureVideoFrame(videoRef.current, { mirror: facingMode === 'user' }));
+        burstFrames.push(captureVideoFrame(videoRef.current, { mirror: cameraSettings.mirrorCamera }));
       }
       count++;
 
@@ -125,7 +150,7 @@ export default function CameraView({ filter, poseLimit = 5, onFinishSession }) {
         setIsRecordingBurst(false);
       }
     }, 150);
-  }, [isReady, facingMode, poseLimit, capturedPhotos.length, isRecordingBurst]);
+  }, [isReady, cameraSettings.mirrorCamera, poseLimit, capturedPhotos.length, isRecordingBurst]);
 
   useEffect(() => {
     if (!isAutoCapturing) return;
@@ -183,18 +208,19 @@ export default function CameraView({ filter, poseLimit = 5, onFinishSession }) {
   return (
     <section className="camera-fullscreen-workspace" style={{
       display: 'grid',
-      gridTemplateColumns: 'minmax(0, 1fr) 260px',
+      gridTemplateColumns: 'minmax(0, 1fr) 280px',
       gap: '1.5rem',
-      maxWidth: '1400px',
+      width: 'calc(100% - 2rem)',
+      maxWidth: '1600px',
       margin: '0 auto',
-      padding: '0 1rem'
+      padding: '0'
     }}>
 
       {/* Big Camera Feed */}
-      <div style={{ position: 'relative', background: 'black', borderRadius: '16px', overflow: 'hidden', aspectRatio: '16/10', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+      <div style={{ position: 'relative', background: 'black', borderRadius: '16px', overflow: 'hidden', aspectRatio: '16/11', maxHeight: 'calc(100svh - 120px)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
         <video
           ref={videoRef}
-          className={facingMode === 'user' ? 'is-mirrored' : ''}
+          className={cameraSettings.mirrorCamera ? 'is-mirrored' : ''}
           playsInline
           muted
           style={{
@@ -400,8 +426,3 @@ export default function CameraView({ filter, poseLimit = 5, onFinishSession }) {
     </section>
   );
 }
-
-function stopStream(stream) {
-  stream?.getTracks().forEach((track) => track.stop());
-}
-

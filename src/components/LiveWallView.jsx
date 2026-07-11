@@ -1,7 +1,9 @@
 import { useEffect, useState } from 'react';
-import { composePhotoCard } from '../utils/photoConfig.js';
+import { composePhotoOutputs } from '../utils/photoConfig.js';
 import { QRCodeSVG } from 'qrcode.react';
-import { backendRequest } from '../utils/backendApi.js';
+import { backendRequest, reportMonitoringError } from '../utils/backendApi.js';
+import { getKioskSettings, getPublicGalleryBaseUrl } from '../utils/kioskConfig.js';
+import { saveRecoverySession } from '../utils/sessionRecovery.js';
 
 const DUMMY_COMMENTS = [
   "Wah, seru banget eventnya! 🔥",
@@ -17,19 +19,153 @@ const getInitialComments = () => DUMMY_COMMENTS.slice(0, 2).map((text, index) =>
 }));
 
 const createLocalGalleryId = () => `local-${Date.now()}`;
+const MAX_BACKEND_IMAGE_BYTES = 7.5 * 1024 * 1024;
+
+const decodedDataUrlSize = (dataUrl = '') => {
+  const base64 = String(dataUrl).split(',')[1] || '';
+  if (!base64) return 0;
+  const padding = base64.endsWith('==') ? 2 : base64.endsWith('=') ? 1 : 0;
+  return Math.max(0, Math.floor((base64.length * 3) / 4) - padding);
+};
+
+const compactDataUrls = (items = []) => (
+  items
+    .filter((item) => typeof item === 'string' && item.startsWith('data:image/') && decodedDataUrlSize(item) > 0)
+    .filter((item, index, all) => all.indexOf(item) === index)
+);
+
+const loadDataUrlImage = (dataUrl) => new Promise((resolve, reject) => {
+  const image = new Image();
+  image.onload = () => resolve(image);
+  image.onerror = () => reject(new Error('Gagal membaca gambar untuk upload backend.'));
+  image.src = dataUrl;
+});
+
+const optimizeDataUrlForBackend = async (dataUrl, options = {}) => {
+  if (typeof dataUrl !== 'string' || !dataUrl.startsWith('data:image/')) return '';
+  if (dataUrl.startsWith('data:image/gif')) return dataUrl;
+
+  const {
+    maxWidth = 1400,
+    maxHeight = 1800,
+    quality = 0.82,
+  } = options;
+
+  try {
+    const image = await loadDataUrlImage(dataUrl);
+    const sourceWidth = image.naturalWidth || image.width;
+    const sourceHeight = image.naturalHeight || image.height;
+    if (!sourceWidth || !sourceHeight) return dataUrl;
+
+    const scale = Math.min(1, maxWidth / sourceWidth, maxHeight / sourceHeight);
+    const width = Math.max(1, Math.round(sourceWidth * scale));
+    const height = Math.max(1, Math.round(sourceHeight * scale));
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    const context = canvas.getContext('2d');
+    context.fillStyle = '#ffffff';
+    context.fillRect(0, 0, width, height);
+    context.drawImage(image, 0, 0, width, height);
+
+    const optimized = canvas.toDataURL('image/jpeg', quality);
+    return decodedDataUrlSize(optimized) < decodedDataUrlSize(dataUrl) ? optimized : dataUrl;
+  } catch (err) {
+    console.warn('Gagal mengoptimasi gambar untuk backend, memakai data asli.', err);
+    return dataUrl;
+  }
+};
+
+const optimizeDataUrlsForBackend = async (items = [], options = {}) => (
+  Promise.all(items.map((item) => optimizeDataUrlForBackend(item, options)))
+);
+
+const createAnimatedGIF = (photos = []) => {
+  const frames = photos.flatMap(photo => (
+    photo.frames && photo.frames.length > 0 ? photo.frames : [photo.src]
+  )).filter(Boolean).slice(0, 24);
+  if (frames.length < 2) return Promise.resolve('');
+
+  return new Promise((resolve) => {
+    import('gifshot').then((module) => {
+      const gifshot = module.default || module;
+    gifshot.createGIF({
+      images: frames,
+      gifWidth: 640,
+      gifHeight: 640,
+      interval: 0.14,
+      numFrames: frames.length,
+      frameDuration: 1,
+      sampleInterval: 10,
+    }, (result) => {
+      if (result?.error) {
+        console.error('Failed to create GIF', result.errorMsg || result.error);
+        resolve('');
+        return;
+      }
+      resolve(result?.image || '');
+    });
+    }).catch((err) => {
+      console.error('Failed to load GIF generator', err);
+      resolve('');
+    });
+  });
+};
 
 export default function LiveWallView({ orderDetails, upsellDetails, capturedPhotos = [], backendSession, onNext }) {
+  const [kioskSettings] = useState(() => getKioskSettings());
+  const galleryBaseUrl = getPublicGalleryBaseUrl(kioskSettings);
+  const galleryUrlFor = (id) => `${galleryBaseUrl}/gallery/${id}`;
   const [finalImages, setFinalImages] = useState([]);
+  const [printImages, setPrintImages] = useState([]);
+  const [printMeta, setPrintMeta] = useState(null);
   const [isProcessing, setIsProcessing] = useState(true);
   const [comments, setComments] = useState(getInitialComments);
   const [localGalleryId] = useState(createLocalGalleryId);
-  const [downloadUrl, setDownloadUrl] = useState(() => {
-    const id = backendSession?.id || localGalleryId;
-    return `${window.location.origin}/gallery/${id}`;
-  });
+  const [downloadUrl, setDownloadUrl] = useState(() => galleryUrlFor(localGalleryId));
   const [waInput, setWaInput] = useState('');
+  const [emailInput, setEmailInput] = useState(backendSession?.email || '');
+  const [driveLinkInput, setDriveLinkInput] = useState('');
   const [gifFrameIndex, setGifFrameIndex] = useState(0);
   const [deliveryMessage, setDeliveryMessage] = useState('');
+  const [backendSaveStatus, setBackendSaveStatus] = useState(backendSession?.id ? 'waiting' : 'local');
+  const [backendSaveError, setBackendSaveError] = useState('');
+  const [backendFinalizePayload, setBackendFinalizePayload] = useState(null);
+
+  const persistRecoverySession = (updates = {}) => {
+    saveRecoverySession({
+      id: backendSession?.id || localGalleryId,
+      backendSessionId: backendSession?.id || '',
+      customerToken: backendSession?.customerToken || '',
+      localGalleryId,
+      downloadUrl,
+      printImage: (printImages.length > 0 ? printImages : finalImages)[0] || '',
+      finalImage: finalImages[0] || '',
+      printMeta,
+      status: backendSaveStatus,
+      error: backendSaveError,
+      createdAt: new Date().toISOString(),
+      ...updates,
+    });
+  };
+
+  const safePrint = (trigger = 'manual') => {
+    try {
+      window.print();
+    } catch (err) {
+      reportMonitoringError({
+        category: 'print',
+        sessionId: backendSession?.id || localGalleryId,
+        message: err.message || 'Gagal membuka dialog print.',
+        source: 'livewall',
+        metadata: {
+          trigger,
+          printerName: kioskSettings.printerName || '',
+          autoPrintEnabled: Boolean(kioskSettings.autoPrintEnabled),
+        },
+      });
+    }
+  };
 
   useEffect(() => {
     const interval = setInterval(() => {
@@ -60,72 +196,253 @@ export default function LiveWallView({ orderDetails, upsellDetails, capturedPhot
     return () => clearInterval(interval);
   }, [previewGifFrames.length]);
 
+  const saveBackendGallery = async (finalizePayload) => {
+    if (!backendSession?.id || !backendSession?.customerToken || !finalizePayload) {
+      setBackendSaveStatus('local');
+      return null;
+    }
+
+    setBackendSaveStatus('saving');
+    setBackendSaveError('');
+    try {
+      let finalized;
+      try {
+        finalized = await backendRequest(`/api/sessions/${backendSession.id}/finalize`, null, {
+          method: 'POST',
+          sessionToken: backendSession.customerToken,
+          body: JSON.stringify(finalizePayload),
+        });
+      } catch (finalizeErr) {
+        if (!finalizePayload.animatedImage) {
+          throw finalizeErr;
+        }
+        console.warn('Backend finalize with GIF failed; retrying static images only.', finalizeErr);
+        finalized = await backendRequest(`/api/sessions/${backendSession.id}/finalize`, null, {
+          method: 'POST',
+          sessionToken: backendSession.customerToken,
+          body: JSON.stringify({ ...finalizePayload, animatedImage: '' }),
+        });
+      }
+
+      const finalizedHasMedia = Boolean(
+        finalized?.animatedImage?.url ||
+        finalized?.finalImage?.url ||
+        finalized?.printImage?.url ||
+        finalized?.images?.length
+      );
+      if (!finalizedHasMedia) {
+        throw new Error('Backend belum mengembalikan file foto.');
+      }
+
+      const publicDownloadUrl = galleryUrlFor(backendSession.id);
+      setDownloadUrl(publicDownloadUrl);
+      setBackendSaveStatus('saved');
+      persistRecoverySession({
+        status: 'saved',
+        error: '',
+        downloadUrl: publicDownloadUrl,
+        backendDownloadUrl: finalized.downloadUrl || '',
+        finalizedAt: new Date().toISOString(),
+      });
+      return finalized;
+    } catch (upErr) {
+      console.error("Backend finalize failed", upErr);
+      reportMonitoringError({
+        category: 'save_photo',
+        sessionId: backendSession?.id || localGalleryId,
+        message: upErr.message || 'Gagal menyimpan hasil ke backend.',
+        source: 'livewall',
+        metadata: {
+          hasFinalImage: Boolean(finalizePayload.finalImage),
+          hasPrintImage: Boolean(finalizePayload.printImage),
+          hasAnimatedImage: Boolean(finalizePayload.animatedImage),
+          imageCount: Array.isArray(finalizePayload.images) ? finalizePayload.images.length : 0,
+        },
+      });
+      setBackendSaveStatus('failed');
+      setBackendSaveError(upErr.message || 'Gagal menyimpan hasil ke backend.');
+      persistRecoverySession({
+        status: 'failed',
+        error: upErr.message || 'Gagal menyimpan hasil ke backend.',
+      });
+      return null;
+    }
+  };
+
+  const handleRetrySave = async () => {
+    if (!backendFinalizePayload || backendSaveStatus === 'saving') return;
+    await saveBackendGallery(backendFinalizePayload);
+  };
+
+  const isCustomerGalleryReady = backendSession?.id
+    ? backendSaveStatus === 'saved'
+    : backendSaveStatus === 'local';
+  const shareUrl = driveLinkInput.trim() || downloadUrl;
+
   useEffect(() => {
     let active = true;
 
     async function processPhotos() {
       try {
         const images = [];
+        const printImages = [];
+        let firstPrintMeta = null;
+        let animatedImage = '';
         // Loop over all created variants from studio editor
         for (const variant of upsellDetails.variants) {
-          const image = await composePhotoCard({
-            photos: variant.photos,
-            filterId: orderDetails.filter.id,
-            frameId: variant.frame.id,
-            frame: variant.frame,
-            frameConfig: variant.frameConfig,
-            slotState: variant.slotState,
-            modeId: variant.template.id,
-            paperSizeId: variant.paperSize?.id,
-          });
-          images.push(image);
-          if (active) {
-            setFinalImages([...images]);
+          try {
+            const output = await composePhotoOutputs({
+              photos: variant.photos,
+              filterId: orderDetails.filter.id,
+              frameId: variant.frame.id,
+              frame: variant.frame,
+              frameConfig: variant.frameConfig,
+              slotState: variant.slotState,
+              modeId: variant.template.id,
+              paperSizeId: variant.paperSize?.id,
+            });
+            const image = output.digitalImage;
+            const printImage = output.printImage || image;
+            if (!firstPrintMeta && output.printMeta) {
+              firstPrintMeta = output.printMeta;
+            }
+            if (image) {
+              images.push(image);
+            }
+            if (printImage) {
+              printImages.push(printImage);
+            }
+            if (active && image) {
+              setFinalImages([...images]);
+            }
+          } catch (composeErr) {
+            console.error('Failed to compose photo output', composeErr);
           }
         }
 
         if (active) {
+          const originalImages = capturedPhotos.map(photo => photo.src).filter(Boolean);
+          if (images.length === 0 && originalImages.length > 0) {
+            images.push(originalImages[0]);
+            printImages.push(originalImages[0]);
+          }
+          animatedImage = await createAnimatedGIF(capturedPhotos);
+          if (decodedDataUrlSize(animatedImage) > MAX_BACKEND_IMAGE_BYTES) {
+            console.warn('Animated GIF is too large for backend upload; keeping static gallery images.');
+            animatedImage = '';
+          }
           setFinalImages(images);
+          setPrintImages(printImages);
+          setPrintMeta(firstPrintMeta);
+          const primaryPrintImage = (printImages.length > 0 ? printImages : images)[0] || '';
           try {
             const localImages = [
+              animatedImage,
               ...images,
               ...capturedPhotos.map(photo => photo.src).filter(Boolean),
-            ];
+            ].filter(Boolean);
             window.localStorage.setItem(`potobox_gallery_${localGalleryId}`, JSON.stringify({
               id: localGalleryId,
               images: localImages,
               createdAt: new Date().toISOString(),
             }));
+            setDownloadUrl(galleryUrlFor(localGalleryId));
+            saveRecoverySession({
+              id: backendSession?.id || localGalleryId,
+              backendSessionId: backendSession?.id || '',
+              customerToken: backendSession?.customerToken || '',
+              localGalleryId,
+              downloadUrl: galleryUrlFor(localGalleryId),
+              printImage: primaryPrintImage,
+              finalImage: images[0] || primaryPrintImage,
+              printMeta: firstPrintMeta,
+              status: backendSession?.id ? 'waiting' : 'local',
+              error: '',
+              createdAt: new Date().toISOString(),
+            });
           } catch (storageErr) {
             console.error('Failed to save local gallery preview', storageErr);
           }
           setIsProcessing(false);
-          // Prioritize showing/printing the final composed result. Digital gallery
-          // uploads and GIF generation continue below without blocking the user.
-          setTimeout(() => {
-            window.print();
-          }, 1500);
+          if (kioskSettings.autoPrintEnabled) {
+            const printDelay = Math.max(0, Number(kioskSettings.printDelaySeconds || 0)) * 1000;
+            setTimeout(() => {
+              safePrint('auto');
+            }, printDelay);
+          }
 
-          if (backendSession?.id) {
+          if (backendSession?.id && backendSession?.customerToken) {
             try {
               const firstVariant = upsellDetails.variants?.[0];
-              const finalized = await backendRequest(`/api/sessions/${backendSession.id}/finalize`, null, {
-                method: 'POST',
-                body: JSON.stringify({
-                  layoutId: firstVariant?.template?.id || orderDetails.layoutId,
-                  paperSize: firstVariant?.paperSize?.id || orderDetails.paperSize,
-                  frameId: firstVariant?.frame?.id || orderDetails.frameId,
-                  finalImage: images[0] || '',
-                  images: [
-                    ...images,
-                    ...capturedPhotos.map(photo => photo.src).filter(Boolean),
-                  ].slice(0, 16),
-                }),
+              const [backendFinalImages, backendPrintImages, backendOriginalImages] = await Promise.all([
+                optimizeDataUrlsForBackend(images, { maxWidth: 1400, maxHeight: 2200, quality: 0.84 }),
+                optimizeDataUrlsForBackend(printImages, { maxWidth: 1400, maxHeight: 2200, quality: 0.84 }),
+                optimizeDataUrlsForBackend(originalImages, { maxWidth: 1280, maxHeight: 1280, quality: 0.8 }),
+              ]);
+              const galleryImages = compactDataUrls([
+                ...backendFinalImages,
+                ...backendPrintImages.filter((image, index) => image && image !== backendFinalImages[index]),
+                ...backendOriginalImages,
+              ]).slice(0, 16);
+              const primaryImage = compactDataUrls([backendFinalImages[0], backendPrintImages[0], backendOriginalImages[0]])[0] || '';
+              const printImage = compactDataUrls([backendPrintImages[0], primaryImage])[0] || '';
+              const finalizePayload = {
+                layoutId: firstVariant?.template?.id || orderDetails.layoutId,
+                paperSize: firstVariant?.paperSize?.id || orderDetails.paperSize,
+                frameId: firstVariant?.frame?.id || orderDetails.frameId,
+                finalImage: primaryImage,
+                printImage,
+                animatedImage,
+                images: galleryImages,
+              };
+              saveRecoverySession({
+                id: backendSession.id,
+                backendSessionId: backendSession.id,
+                customerToken: backendSession.customerToken,
+                localGalleryId,
+                downloadUrl: galleryUrlFor(localGalleryId),
+                printImage: primaryPrintImage,
+                finalImage: images[0] || primaryPrintImage,
+                printMeta: firstPrintMeta,
+                finalizePayload,
+                status: 'saving',
+                error: '',
+                createdAt: new Date().toISOString(),
               });
-              setDownloadUrl(finalized.downloadUrl || `${window.location.origin}/gallery/${backendSession.id}`);
+              console.info('Finalizing backend gallery', {
+                images: finalizePayload.images.length,
+                finalImageBytes: decodedDataUrlSize(finalizePayload.finalImage),
+                printImageBytes: decodedDataUrlSize(finalizePayload.printImage),
+                animatedImageBytes: decodedDataUrlSize(finalizePayload.animatedImage),
+                totalImageBytes: compactDataUrls([
+                  finalizePayload.finalImage,
+                  finalizePayload.printImage,
+                  finalizePayload.animatedImage,
+                  ...finalizePayload.images,
+                ]).reduce((total, image) => total + decodedDataUrlSize(image), 0),
+              });
+              setBackendFinalizePayload(finalizePayload);
+              await saveBackendGallery(finalizePayload);
             } catch (upErr) {
               console.error("Backend finalize failed", upErr);
+              setBackendSaveStatus('failed');
+              setBackendSaveError(upErr.message || 'Gagal menyiapkan hasil untuk backend.');
+              saveRecoverySession({
+                id: backendSession.id,
+                backendSessionId: backendSession.id,
+                customerToken: backendSession.customerToken,
+                localGalleryId,
+                downloadUrl: galleryUrlFor(localGalleryId),
+                printImage: primaryPrintImage,
+                finalImage: images[0] || primaryPrintImage,
+                printMeta: firstPrintMeta,
+                status: 'failed',
+                error: upErr.message || 'Gagal menyiapkan hasil untuk backend.',
+                createdAt: new Date().toISOString(),
+              });
             }
+          } else {
+            setBackendSaveStatus('local');
           }
         }
       } catch (err) {
@@ -139,29 +456,91 @@ export default function LiveWallView({ orderDetails, upsellDetails, capturedPhot
     return () => {
       active = false;
     };
-  }, [orderDetails, upsellDetails, backendSession?.id]);
+  }, [orderDetails, upsellDetails, backendSession?.id, kioskSettings.autoPrintEnabled, kioskSettings.printDelaySeconds]);
 
   const handleSendWhatsApp = async (e) => {
     e.preventDefault();
     const normalizedNumber = waInput.replace(/[^\d]/g, '').replace(/^0/, '62');
     if (!normalizedNumber) return;
     setDeliveryMessage('');
+    if (!isCustomerGalleryReady) {
+      setDeliveryMessage('Tunggu sampai status hasil tersimpan, lalu kirim ulang.');
+      return;
+    }
     if (backendSession?.id) {
       try {
         await backendRequest(`/api/sessions/${backendSession.id}/send-link`, null, {
           method: 'POST',
+          sessionToken: backendSession.customerToken,
           body: JSON.stringify({
             channel: 'whatsapp',
             recipient: normalizedNumber,
+            downloadUrl: shareUrl,
           }),
         });
         setDeliveryMessage('Link WhatsApp tercatat di backend.');
       } catch (err) {
+        reportMonitoringError({
+          category: 'whatsapp',
+          sessionId: backendSession?.id || localGalleryId,
+          message: err.message || 'Gagal mencatat link WhatsApp.',
+          source: 'livewall',
+          metadata: {
+            recipient: normalizedNumber,
+            downloadUrl: shareUrl,
+          },
+        });
         setDeliveryMessage(err.message);
       }
     }
-    const message = `Halo! Ini link hasil foto Urbanmenphoto kamu:\n${downloadUrl}\n\nLink aktif selama 7 hari.`;
+    const message = `Halo! Ini link hasil foto Urbanmenphoto kamu:\n${shareUrl}\n\nLink aktif selama 7 hari.`;
     window.open(`https://wa.me/${normalizedNumber}?text=${encodeURIComponent(message)}`, '_blank', 'noopener,noreferrer');
+  };
+
+  const handleSendEmail = async (e) => {
+    e.preventDefault();
+    const email = emailInput.trim().toLowerCase();
+    if (!email) return;
+    setDeliveryMessage('');
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
+      setDeliveryMessage('Format email tidak valid.');
+      return;
+    }
+    if (!isCustomerGalleryReady) {
+      setDeliveryMessage('Tunggu sampai status hasil tersimpan, lalu kirim ulang.');
+      return;
+    }
+    if (!backendSession?.id) {
+      setDeliveryMessage('Email hanya bisa dicatat setelah sesi tersimpan di backend.');
+      return;
+    }
+
+    try {
+      const message = await backendRequest(`/api/sessions/${backendSession.id}/send-link`, null, {
+        method: 'POST',
+        sessionToken: backendSession.customerToken,
+        body: JSON.stringify({
+          channel: 'email',
+          recipient: email,
+          downloadUrl: shareUrl,
+        }),
+      });
+      setDeliveryMessage(message?.status === 'sent'
+        ? 'Link hasil foto berhasil dikirim ke email.'
+        : 'Link email tercatat. Isi SMTP backend agar email terkirim otomatis.');
+    } catch (err) {
+      reportMonitoringError({
+        category: 'email',
+        sessionId: backendSession?.id || localGalleryId,
+        message: err.message || 'Gagal mencatat link email.',
+        source: 'livewall',
+        metadata: {
+          recipient: email,
+          downloadUrl: shareUrl,
+        },
+      });
+      setDeliveryMessage(err.message);
+    }
   };
 
   if (isProcessing) {
@@ -235,20 +614,68 @@ export default function LiveWallView({ orderDetails, upsellDetails, capturedPhot
   }
 
 
-  // Hitung jumlah print dari tier * headCount
-  const effectiveHeadCount = orderDetails.headCount || 1;
-  const totalPrints = orderDetails.tier.printLimit * effectiveHeadCount;
+  const primaryPrintImage = (printImages.length > 0 ? printImages : finalImages)[0];
+  const saveStatusInfo = {
+    waiting: {
+      label: 'Menunggu hasil',
+      detail: 'Hasil sedang disiapkan sebelum dikirim ke backend.',
+      background: 'rgba(148, 163, 184, 0.16)',
+      border: 'rgba(148, 163, 184, 0.35)',
+      color: '#cbd5e1',
+    },
+    saving: {
+      label: 'Menyimpan hasil...',
+      detail: 'Jangan tutup layar ini sampai status berubah menjadi tersimpan.',
+      background: 'rgba(249, 115, 22, 0.16)',
+      border: 'rgba(249, 115, 22, 0.45)',
+      color: '#fed7aa',
+    },
+    saved: {
+      label: 'Hasil tersimpan',
+      detail: 'QR dan link sudah memakai gallery backend customer.',
+      background: 'rgba(34, 197, 94, 0.16)',
+      border: 'rgba(34, 197, 94, 0.45)',
+      color: '#bbf7d0',
+    },
+    failed: {
+      label: 'Gagal menyimpan',
+      detail: backendSaveError || 'Tekan retry untuk menyimpan ulang tanpa foto ulang.',
+      background: 'rgba(239, 68, 68, 0.16)',
+      border: 'rgba(239, 68, 68, 0.45)',
+      color: '#fecaca',
+    },
+    local: {
+      label: 'Tersimpan lokal',
+      detail: 'Backend belum aktif untuk sesi ini, link hanya tersedia di perangkat ini.',
+      background: 'rgba(148, 163, 184, 0.16)',
+      border: 'rgba(148, 163, 184, 0.35)',
+      color: '#cbd5e1',
+    },
+  }[backendSaveStatus] || {};
 
   return (
-    <div style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column', background: '#fcfaf6', color: '#1f2937' }}>
+    <div className="live-wall-print-root" style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column', background: '#fcfaf6', color: '#1f2937' }}>
       {/* Hidden Print Area */}
       <div className="print-area">
-        <div style={{ padding: '20px', fontFamily: 'sans-serif', textAlign: 'center' }}>
-          <h2>Cetak {totalPrints}x (Sesuai Paket {orderDetails.tier?.name} - {effectiveHeadCount} Org)</h2>
-        </div>
-        {finalImages.map((img, idx) => (
-          <img key={idx} src={img} alt={`Print ${idx}`} style={{ width: '100%', maxWidth: '4in', margin: '0 auto', display: 'block', pageBreakAfter: 'always' }} />
-        ))}
+        {printMeta && (
+          <style>{`
+            @page {
+              size: ${printMeta.inchWidth}in ${printMeta.inchHeight}in;
+              margin: 0;
+            }
+          `}</style>
+        )}
+        {primaryPrintImage && (
+          <img
+            src={primaryPrintImage}
+            alt="Print utama"
+            className="print-output-image"
+            style={{
+              width: printMeta ? `${printMeta.inchWidth}in` : '4in',
+              height: printMeta ? `${printMeta.inchHeight}in` : '6in',
+            }}
+          />
+        )}
       </div>
 
       {/* Main Content Area */}
@@ -313,19 +740,68 @@ export default function LiveWallView({ orderDetails, upsellDetails, capturedPhot
               Use your phone to scan this QR code and access your photos anytime.
             </p>
 
-            <div style={{ background: 'white', padding: '1.2rem', borderRadius: '24px', marginBottom: '1.5rem' }}>
-              <QRCodeSVG value={downloadUrl} size={150} />
+            <div style={{ background: 'white', padding: '1.2rem', borderRadius: '24px', marginBottom: '1.5rem', width: '190px', height: '190px', display: 'grid', placeItems: 'center' }}>
+              {isCustomerGalleryReady ? (
+                <QRCodeSVG value={shareUrl} size={150} />
+              ) : (
+                <div style={{ width: 150, height: 150, borderRadius: '18px', background: '#f3f4f6', color: '#64748b', display: 'grid', placeItems: 'center', textAlign: 'center', padding: '1rem', fontWeight: 900, fontSize: '0.78rem', lineHeight: 1.35 }}>
+                  QR siap setelah hasil tersimpan
+                </div>
+              )}
+            </div>
+
+            <div style={{
+              width: '100%',
+              maxWidth: '320px',
+              marginBottom: '1.25rem',
+              padding: '0.85rem 1rem',
+              borderRadius: '14px',
+              border: `1px solid ${saveStatusInfo.border}`,
+              background: saveStatusInfo.background,
+              color: saveStatusInfo.color,
+              textAlign: 'center',
+              boxShadow: backendSaveStatus === 'saving' ? '0 0 24px rgba(249, 115, 22, 0.12)' : 'none',
+            }}>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.5rem', fontWeight: 900, fontSize: '0.9rem' }}>
+                {backendSaveStatus === 'saving' && (
+                  <span style={{ width: 8, height: 8, borderRadius: '50%', background: '#f97316', boxShadow: '0 0 10px #f97316', display: 'inline-block' }} />
+                )}
+                {saveStatusInfo.label}
+              </div>
+              <p style={{ margin: '0.35rem 0 0', color: '#9ca3af', fontSize: '0.74rem', lineHeight: 1.4 }}>
+                {saveStatusInfo.detail}
+              </p>
+              {backendSaveStatus === 'failed' && (
+                <button
+                  type="button"
+                  onClick={handleRetrySave}
+                  disabled={!backendFinalizePayload}
+                  style={{
+                    marginTop: '0.75rem',
+                    width: '100%',
+                    border: 'none',
+                    borderRadius: '999px',
+                    padding: '0.7rem 1rem',
+                    background: backendFinalizePayload ? '#f97316' : '#374151',
+                    color: 'white',
+                    fontWeight: 900,
+                    cursor: backendFinalizePayload ? 'pointer' : 'not-allowed',
+                  }}
+                >
+                  Retry Save
+                </button>
+              )}
             </div>
 
             <p style={{ fontSize: '0.7rem', color: '#6b7280', letterSpacing: '2px', fontWeight: 'bold', marginBottom: '0.5rem' }}>OR VISIT</p>
-            <p style={{ fontSize: '0.85rem', color: '#9ca3af', marginBottom: '2rem' }}>{downloadUrl}</p>
+            <p style={{ fontSize: '0.85rem', color: '#9ca3af', marginBottom: '1.3rem', maxWidth: '320px', overflowWrap: 'anywhere', textAlign: 'center' }}>{shareUrl}</p>
 
-            <form onSubmit={handleSendWhatsApp} style={{ display: 'flex', flexDirection: 'column', gap: '0.8rem', width: '100%', maxWidth: '280px', marginBottom: '0.8rem' }}>
+            <form onSubmit={handleSendEmail} style={{ display: 'flex', flexDirection: 'column', gap: '0.8rem', width: '100%', maxWidth: '280px', marginBottom: '0.8rem' }}>
               <input
-                type="tel"
-                value={waInput}
-                onChange={(event) => setWaInput(event.target.value)}
-                placeholder="Nomor WhatsApp"
+                type="email"
+                value={emailInput}
+                onChange={(event) => setEmailInput(event.target.value)}
+                placeholder="Email customer"
                 style={{
                   width: '100%',
                   background: '#111827',
@@ -337,16 +813,13 @@ export default function LiveWallView({ orderDetails, upsellDetails, capturedPhot
                   outline: 'none'
                 }}
               />
-              <button type="submit" style={{ background: '#22c55e', color: 'white', border: 'none', padding: '1rem', borderRadius: '12px', fontWeight: 'bold', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.5rem', fontSize: '0.9rem' }}>
-                KIRIM VIA WHATSAPP
+              <button type="submit" disabled={!isCustomerGalleryReady} style={{ background: isCustomerGalleryReady ? '#f97316' : '#374151', color: 'white', border: 'none', padding: '1rem', borderRadius: '12px', fontWeight: 'bold', cursor: isCustomerGalleryReady ? 'pointer' : 'not-allowed', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.5rem', fontSize: '0.9rem' }}>
+                KIRIM VIA EMAIL
               </button>
               {deliveryMessage && <div style={{ color: '#9ca3af', fontSize: '0.75rem', textAlign: 'center' }}>{deliveryMessage}</div>}
             </form>
 
             <div style={{ display: 'flex', flexDirection: 'column', gap: '0.8rem', width: '100%', maxWidth: '280px' }}>
-              <button onClick={() => window.print()} style={{ background: '#27272a', color: 'white', border: '1px solid rgba(255,255,255,0.1)', padding: '1rem', borderRadius: '12px', fontWeight: 'bold', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.5rem', fontSize: '0.9rem' }}>
-                🖨️ PRINT PHOTO
-              </button>
               <button onClick={onNext} style={{ background: 'white', color: 'black', border: 'none', padding: '1rem', borderRadius: '12px', fontWeight: 'bold', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.5rem', fontSize: '0.9rem' }}>
                 📸 TAKE PHOTO AGAIN
               </button>

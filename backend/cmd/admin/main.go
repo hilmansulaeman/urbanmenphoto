@@ -12,10 +12,10 @@ import (
 
 	"golang.org/x/term"
 
-	"urbanmenphoto/backend/internal/auth"
-	"urbanmenphoto/backend/internal/config"
-	"urbanmenphoto/backend/internal/models"
-	"urbanmenphoto/backend/internal/store"
+	"urbanmenphoto/backend/app/auth"
+	"urbanmenphoto/backend/app/config"
+	"urbanmenphoto/backend/app/models"
+	"urbanmenphoto/backend/app/store"
 )
 
 func main() {

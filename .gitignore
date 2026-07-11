@@ -7,3 +7,5 @@ backend/storage/
 backend/.cache/
 backend/backend/data/
 backend/backend/storage/
+.vercel
+.env*

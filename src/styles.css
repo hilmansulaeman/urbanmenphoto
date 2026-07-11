@@ -20,10 +20,20 @@
   box-sizing: border-box;
 }
 
+html,
 body {
   margin: 0;
   min-width: 320px;
   min-height: 100svh;
+  width: 100%;
+  overflow-x: hidden;
+  background:
+    linear-gradient(180deg, #fffdf8 0%, #f7f4ef 100%);
+}
+
+#root {
+  min-height: 100svh;
+  width: 100%;
 }
 
 button {
@@ -203,9 +213,48 @@ button {
 
 .app-shell {
   min-height: 100svh;
+  width: 100%;
+  min-width: 100vw;
   background:
     linear-gradient(180deg, #fffdf8 0%, #f7f4ef 100%);
   padding: 1rem;
+}
+
+.fullscreen-toggle {
+  position: fixed;
+  left: clamp(1rem, 2vw, 1.75rem);
+  bottom: clamp(1rem, 2vw, 1.75rem);
+  z-index: 1000;
+  display: grid;
+  width: 6.2rem;
+  height: 4rem;
+  place-items: center;
+  border-radius: 999px;
+  background: rgba(20, 20, 20, 0.76);
+  color: white;
+  box-shadow: 0 16px 38px rgba(0, 0, 0, 0.28);
+  cursor: pointer;
+  backdrop-filter: blur(14px);
+  transition:
+    transform 180ms ease,
+    background 180ms ease,
+    box-shadow 180ms ease;
+}
+
+.fullscreen-toggle:hover {
+  transform: translateY(-2px);
+  background: rgba(20, 20, 20, 0.86);
+  box-shadow: 0 20px 46px rgba(0, 0, 0, 0.34);
+}
+
+.fullscreen-toggle svg {
+  width: 2.05rem;
+  height: 2.05rem;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
 .topbar {
@@ -878,6 +927,10 @@ button {
     grid-template-columns: 1fr;
   }
 
+  .camera-fullscreen-workspace {
+    grid-template-columns: 1fr !important;
+  }
+
   .control-panel {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
@@ -1367,18 +1420,64 @@ button {
 }
 
 @media print {
+  html,
+  body,
+  #root {
+    width: 100%;
+    height: 100%;
+    margin: 0 !important;
+    padding: 0 !important;
+    background: #fff !important;
+    overflow: hidden !important;
+  }
+
   body * {
     visibility: hidden;
   }
-  .print-area, .print-area * {
-    visibility: visible;
+
+  .live-wall-print-root {
+    display: block !important;
+    visibility: visible !important;
+    min-height: 0 !important;
+    height: 100vh !important;
+    overflow: hidden !important;
   }
+
+  .live-wall-print-root > :not(.print-area) {
+    display: none !important;
+  }
+
+  .print-area, .print-area * {
+    visibility: visible !important;
+  }
+
   .print-area {
-    position: absolute;
+    display: block !important;
+    position: fixed !important;
     left: 0;
     top: 0;
-    width: 100%;
-    display: block !important;
+    right: 0;
+    bottom: 0;
+    width: 100vw !important;
+    height: 100vh !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    overflow: hidden !important;
+    background: #fff !important;
+  }
+
+  .print-area .print-output-image:not(:first-of-type) {
+    display: none !important;
+  }
+
+  .print-output-image {
+    display: block;
+    margin: 0 !important;
+    object-fit: contain;
+    page-break-before: avoid;
+    page-break-after: avoid;
+    break-before: avoid;
+    break-after: avoid;
   }
 }
 
@@ -1393,7 +1492,7 @@ button {
 }
 
 .how-it-works-section {
-  max-width: 1000px;
+  max-width: 1180px;
   width: 100%;
   display: flex;
   flex-direction: column;
@@ -1402,11 +1501,11 @@ button {
 
 .how-it-works-header {
   text-align: center;
-  margin-bottom: 3rem;
+  margin-bottom: 3.4rem;
 }
 
 .how-it-works-header h2 {
-  font-size: 2.5rem;
+  font-size: 3.15rem;
   font-weight: 400;
   color: var(--ink);
   margin: 0 0 0.5rem 0;
@@ -1415,22 +1514,22 @@ button {
 
 .how-it-works-header p {
   color: var(--muted);
-  font-size: 1rem;
+  font-size: 1.2rem;
   margin: 0;
 }
 
 .steps-container {
   display: flex;
   flex-direction: column;
-  gap: 0.8rem;
+  gap: 1.15rem;
   width: 100%;
-  max-width: 800px; /* Adjust to match the width of 3 cards */
-  margin-bottom: 3rem;
+  max-width: 1020px; /* Adjust to match the width of 3 cards */
+  margin-bottom: 3.5rem;
 }
 
 .steps-row {
   display: flex;
-  gap: 1.5rem;
+  gap: 2rem;
   justify-content: center;
 }
 
@@ -1441,12 +1540,12 @@ button {
 
 .step-card {
   flex: 1;
-  min-width: 200px;
-  max-width: 250px;
+  min-width: 280px;
+  max-width: 320px;
   background: var(--paper);
   border: 1px solid var(--line);
   border-radius: 12px;
-  padding: 1.25rem;
+  padding: 1.6rem;
   box-shadow: 0 4px 20px rgba(0, 0, 0, 0.03);
   display: flex;
   flex-direction: column;
@@ -1456,12 +1555,12 @@ button {
   display: flex;
   justify-content: space-between;
   align-items: flex-start;
-  margin-bottom: 1rem;
+  margin-bottom: 1.2rem;
 }
 
 .step-icon {
-  width: 36px;
-  height: 36px;
+  width: 46px;
+  height: 46px;
   border-radius: 50%;
   background: #fff1eb;
   color: var(--accent);
@@ -1471,19 +1570,19 @@ button {
 }
 
 .step-icon svg {
-  width: 18px !important;
-  height: 18px !important;
+  width: 23px !important;
+  height: 23px !important;
 }
 
 .step-number {
-  font-size: 1.5rem;
+  font-size: 2rem;
   font-weight: 800;
   color: #ffa38c; /* Light pinkish orange */
   line-height: 1;
 }
 
 .step-title {
-  font-size: 0.85rem;
+  font-size: 1.05rem;
   font-weight: 800;
   color: var(--ink);
   margin: 0 0 0.5rem 0;
@@ -1491,7 +1590,7 @@ button {
 }
 
 .step-desc {
-  font-size: 0.75rem;
+  font-size: 0.9rem;
   color: var(--muted);
   margin: 0;
   line-height: 1.4;
@@ -1504,8 +1603,9 @@ button {
 }
 
 .start-btn {
-  font-size: 1.1rem;
-  padding: 0 3rem;
+  min-height: 4rem;
+  font-size: 1.25rem;
+  padding: 0 4.2rem;
 }
 
 @media (max-width: 768px) {

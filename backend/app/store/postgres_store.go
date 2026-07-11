@@ -2,13 +2,14 @@ package store
 
 import (
 	"database/sql"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 
-	"urbanmenphoto/backend/internal/models"
+	"urbanmenphoto/backend/app/models"
 )
 
 type PostgresStore struct {
@@ -58,7 +59,9 @@ func resolveMigrationPath() string {
 func (s *PostgresStore) ListSessions() []models.Session {
 	rows, err := s.db.Query(`
 		SELECT id, short_code, email, phone, layout_id, paper_size, frame_id, status,
-		       final_image_key, final_image_url, download_url, created_at, updated_at, expires_at
+		       final_image_key, final_image_url, print_image_key, print_image_url,
+		       animated_image_key, animated_image_url,
+		       download_url, customer_token_hash, created_at, updated_at, expires_at
 		FROM sessions
 		ORDER BY created_at DESC
 		LIMIT 500
@@ -81,7 +84,9 @@ func (s *PostgresStore) ListSessions() []models.Session {
 func (s *PostgresStore) FindSession(id string) (models.Session, bool) {
 	row := s.db.QueryRow(`
 		SELECT id, short_code, email, phone, layout_id, paper_size, frame_id, status,
-		       final_image_key, final_image_url, download_url, created_at, updated_at, expires_at
+		       final_image_key, final_image_url, print_image_key, print_image_url,
+		       animated_image_key, animated_image_url,
+		       download_url, customer_token_hash, created_at, updated_at, expires_at
 		FROM sessions
 		WHERE id = $1 OR short_code = $1
 	`, id)
@@ -97,11 +102,14 @@ func (s *PostgresStore) InsertSession(session models.Session) error {
 	_, err := s.db.Exec(`
 		INSERT INTO sessions (
 			id, short_code, email, phone, layout_id, paper_size, frame_id, status,
-			final_image_key, final_image_url, download_url, created_at, updated_at, expires_at
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+			final_image_key, final_image_url, print_image_key, print_image_url,
+			animated_image_key, animated_image_url,
+			download_url, customer_token_hash, created_at, updated_at, expires_at
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
 	`, session.ID, session.ShortCode, session.Email, session.Phone, session.LayoutID, session.PaperSize, session.FrameID,
-		session.Status, imageKey(session.FinalImage), imageURL(session.FinalImage), session.DownloadURL,
-		session.CreatedAt, session.UpdatedAt, session.ExpiresAt)
+		session.Status, imageKey(session.FinalImage), imageURL(session.FinalImage), imageKey(session.PrintImage), imageURL(session.PrintImage),
+		imageKey(session.AnimatedImage), imageURL(session.AnimatedImage), session.DownloadURL,
+		session.CustomerTokenHash, session.CreatedAt, session.UpdatedAt, session.ExpiresAt)
 	return err
 }
 
@@ -109,11 +117,14 @@ func (s *PostgresStore) UpdateSession(session models.Session) error {
 	_, err := s.db.Exec(`
 		UPDATE sessions
 		SET email=$2, phone=$3, layout_id=$4, paper_size=$5, frame_id=$6, status=$7,
-		    final_image_key=$8, final_image_url=$9, download_url=$10, updated_at=$11, expires_at=$12
+		    final_image_key=$8, final_image_url=$9, print_image_key=$10, print_image_url=$11,
+		    animated_image_key=$12, animated_image_url=$13,
+		    download_url=$14, customer_token_hash=$15, updated_at=$16, expires_at=$17
 		WHERE id=$1
 	`, session.ID, session.Email, session.Phone, session.LayoutID, session.PaperSize, session.FrameID,
-		session.Status, imageKey(session.FinalImage), imageURL(session.FinalImage), session.DownloadURL,
-		session.UpdatedAt, session.ExpiresAt)
+		session.Status, imageKey(session.FinalImage), imageURL(session.FinalImage), imageKey(session.PrintImage), imageURL(session.PrintImage),
+		imageKey(session.AnimatedImage), imageURL(session.AnimatedImage), session.DownloadURL,
+		session.CustomerTokenHash, session.UpdatedAt, session.ExpiresAt)
 	if err != nil {
 		return err
 	}
@@ -167,7 +178,8 @@ func (s *PostgresStore) MessagesBySession(sessionID string) []models.Message {
 
 func (s *PostgresStore) ListPayments() []models.Payment {
 	rows, err := s.db.Query(`
-		SELECT id, session_id, provider, amount, currency, status, created_at, updated_at
+		SELECT id, session_id, provider, amount, currency, status,
+		       provider_reference, snap_token, checkout_url, created_at, updated_at
 		FROM payments
 		ORDER BY created_at DESC
 		LIMIT 500
@@ -181,7 +193,8 @@ func (s *PostgresStore) ListPayments() []models.Payment {
 
 func (s *PostgresStore) FindPayment(id string) (models.Payment, bool) {
 	row := s.db.QueryRow(`
-		SELECT id, session_id, provider, amount, currency, status, created_at, updated_at
+		SELECT id, session_id, provider, amount, currency, status,
+		       provider_reference, snap_token, checkout_url, created_at, updated_at
 		FROM payments
 		WHERE id = $1
 	`, id)
@@ -191,7 +204,8 @@ func (s *PostgresStore) FindPayment(id string) (models.Payment, bool) {
 
 func (s *PostgresStore) PaymentsBySession(sessionID string) []models.Payment {
 	rows, err := s.db.Query(`
-		SELECT id, session_id, provider, amount, currency, status, created_at, updated_at
+		SELECT id, session_id, provider, amount, currency, status,
+		       provider_reference, snap_token, checkout_url, created_at, updated_at
 		FROM payments
 		WHERE session_id = $1
 		ORDER BY created_at DESC
@@ -205,18 +219,24 @@ func (s *PostgresStore) PaymentsBySession(sessionID string) []models.Payment {
 
 func (s *PostgresStore) InsertPayment(payment models.Payment) error {
 	_, err := s.db.Exec(`
-		INSERT INTO payments (id, session_id, provider, amount, currency, status, created_at, updated_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-	`, payment.ID, payment.SessionID, payment.Provider, payment.Amount, payment.Currency, payment.Status, payment.CreatedAt, payment.UpdatedAt)
+		INSERT INTO payments (
+			id, session_id, provider, amount, currency, status,
+			provider_reference, snap_token, checkout_url, created_at, updated_at
+		)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+	`, payment.ID, payment.SessionID, payment.Provider, payment.Amount, payment.Currency, payment.Status,
+		payment.ProviderRef, payment.SnapToken, payment.CheckoutURL, payment.CreatedAt, payment.UpdatedAt)
 	return err
 }
 
 func (s *PostgresStore) UpdatePayment(payment models.Payment) error {
 	_, err := s.db.Exec(`
 		UPDATE payments
-		SET provider=$2, amount=$3, currency=$4, status=$5, updated_at=$6
+		SET provider=$2, amount=$3, currency=$4, status=$5,
+		    provider_reference=$6, snap_token=$7, checkout_url=$8, updated_at=$9
 		WHERE id=$1
-	`, payment.ID, payment.Provider, payment.Amount, payment.Currency, payment.Status, payment.UpdatedAt)
+	`, payment.ID, payment.Provider, payment.Amount, payment.Currency, payment.Status,
+		payment.ProviderRef, payment.SnapToken, payment.CheckoutURL, payment.UpdatedAt)
 	return err
 }
 
@@ -266,7 +286,10 @@ func (s *PostgresStore) PaymentLogsByPayment(paymentID string) []models.PaymentL
 
 func (s *PostgresStore) ListFrames() []models.Frame {
 	rows, err := s.db.Query(`
-		SELECT id, name, category, layout_count, image_url, COALESCE(slot_json::text, ''), active, created_at, updated_at
+		SELECT id, name, category, layout_count, image_url, COALESCE(slot_json::text, ''),
+		       COALESCE(template_type, 'strip'), COALESCE(paper_size, 'strip-2x6'),
+		       COALESCE(orientation, 'portrait'), COALESCE(print_mode, 'auto'),
+		       COALESCE(print_copies, 2), active, created_at, updated_at
 		FROM frames
 		ORDER BY created_at DESC
 	`)
@@ -278,7 +301,11 @@ func (s *PostgresStore) ListFrames() []models.Frame {
 	frames := []models.Frame{}
 	for rows.Next() {
 		var frame models.Frame
-		if err := rows.Scan(&frame.ID, &frame.Name, &frame.Category, &frame.LayoutCount, &frame.ImageURL, &frame.SlotJSON, &frame.Active, &frame.CreatedAt, &frame.UpdatedAt); err == nil {
+		if err := rows.Scan(
+			&frame.ID, &frame.Name, &frame.Category, &frame.LayoutCount, &frame.ImageURL, &frame.SlotJSON,
+			&frame.TemplateType, &frame.PaperSize, &frame.Orientation, &frame.PrintMode, &frame.PrintCopies,
+			&frame.Active, &frame.CreatedAt, &frame.UpdatedAt,
+		); err == nil {
 			frames = append(frames, frame)
 		}
 	}
@@ -288,23 +315,119 @@ func (s *PostgresStore) ListFrames() []models.Frame {
 func (s *PostgresStore) UpsertFrame(frame models.Frame) error {
 	slotJSON := sql.NullString{String: frame.SlotJSON, Valid: frame.SlotJSON != ""}
 	_, err := s.db.Exec(`
-		INSERT INTO frames (id, name, category, layout_count, image_url, slot_json, active, created_at, updated_at)
-		VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8,$9)
+		INSERT INTO frames (
+			id, name, category, layout_count, image_url, slot_json,
+			template_type, paper_size, orientation, print_mode, print_copies,
+			active, created_at, updated_at
+		)
+		VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8,$9,$10,$11,$12,$13,$14)
 		ON CONFLICT (id) DO UPDATE SET
 			name=EXCLUDED.name,
 			category=EXCLUDED.category,
 			layout_count=EXCLUDED.layout_count,
 			image_url=EXCLUDED.image_url,
 			slot_json=EXCLUDED.slot_json,
+			template_type=EXCLUDED.template_type,
+			paper_size=EXCLUDED.paper_size,
+			orientation=EXCLUDED.orientation,
+			print_mode=EXCLUDED.print_mode,
+			print_copies=EXCLUDED.print_copies,
 			active=EXCLUDED.active,
 			updated_at=EXCLUDED.updated_at
-	`, frame.ID, frame.Name, frame.Category, frame.LayoutCount, frame.ImageURL, slotJSON, frame.Active, frame.CreatedAt, frame.UpdatedAt)
+	`, frame.ID, frame.Name, frame.Category, frame.LayoutCount, frame.ImageURL, slotJSON,
+		frame.TemplateType, frame.PaperSize, frame.Orientation, frame.PrintMode, frame.PrintCopies,
+		frame.Active, frame.CreatedAt, frame.UpdatedAt)
 	return err
 }
 
 func (s *PostgresStore) DeleteFrame(id string) error {
 	_, err := s.db.Exec(`DELETE FROM frames WHERE id = $1`, id)
 	return err
+}
+
+func (s *PostgresStore) ListVouchers() []models.Voucher {
+	rows, err := s.db.Query(`
+		SELECT id, code, name, type, value, min_amount, max_discount,
+		       usage_limit, used_count, active, starts_at, ends_at, created_at, updated_at
+		FROM vouchers
+		ORDER BY created_at DESC
+	`)
+	if err != nil {
+		return []models.Voucher{}
+	}
+	defer rows.Close()
+
+	vouchers := []models.Voucher{}
+	for rows.Next() {
+		var voucher models.Voucher
+		var startsAt, endsAt sql.NullTime
+		if err := rows.Scan(
+			&voucher.ID,
+			&voucher.Code,
+			&voucher.Name,
+			&voucher.Type,
+			&voucher.Value,
+			&voucher.MinAmount,
+			&voucher.MaxDiscount,
+			&voucher.UsageLimit,
+			&voucher.UsedCount,
+			&voucher.Active,
+			&startsAt,
+			&endsAt,
+			&voucher.CreatedAt,
+			&voucher.UpdatedAt,
+		); err == nil {
+			if startsAt.Valid {
+				voucher.StartsAt = &startsAt.Time
+			}
+			if endsAt.Valid {
+				voucher.EndsAt = &endsAt.Time
+			}
+			vouchers = append(vouchers, voucher)
+		}
+	}
+	return vouchers
+}
+
+func (s *PostgresStore) UpsertVoucher(voucher models.Voucher) error {
+	_, err := s.db.Exec(`
+		INSERT INTO vouchers (
+			id, code, name, type, value, min_amount, max_discount,
+			usage_limit, used_count, active, starts_at, ends_at, created_at, updated_at
+		)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+		ON CONFLICT (id) DO UPDATE SET
+			code=EXCLUDED.code,
+			name=EXCLUDED.name,
+			type=EXCLUDED.type,
+			value=EXCLUDED.value,
+			min_amount=EXCLUDED.min_amount,
+			max_discount=EXCLUDED.max_discount,
+			usage_limit=EXCLUDED.usage_limit,
+			used_count=EXCLUDED.used_count,
+			active=EXCLUDED.active,
+			starts_at=EXCLUDED.starts_at,
+			ends_at=EXCLUDED.ends_at,
+			updated_at=EXCLUDED.updated_at
+	`, voucher.ID, voucher.Code, voucher.Name, voucher.Type, voucher.Value, voucher.MinAmount,
+		voucher.MaxDiscount, voucher.UsageLimit, voucher.UsedCount, voucher.Active,
+		voucher.StartsAt, voucher.EndsAt, voucher.CreatedAt, voucher.UpdatedAt)
+	return err
+}
+
+func (s *PostgresStore) DeleteVoucher(id string) error {
+	result, err := s.db.Exec(`DELETE FROM vouchers WHERE id = $1`, id)
+	if err != nil {
+		return err
+	}
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rowsAffected == 0 {
+		return os.ErrNotExist
+	}
+	return nil
 }
 
 func (s *PostgresStore) FindAdminUserByEmail(email string) (models.AdminUser, bool) {
@@ -424,16 +547,23 @@ func (s *PostgresStore) DeleteAdminToken(tokenHash string) error {
 }
 
 func (s *PostgresStore) InsertAuditLog(log models.AuditLog) error {
-	_, err := s.db.Exec(`
-		INSERT INTO audit_logs (id, actor_id, action, resource, ip, user_agent, success, created_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-	`, log.ID, log.ActorID, log.Action, log.Resource, log.IP, log.UserAgent, log.Success, log.CreatedAt)
+	if log.Metadata == nil {
+		log.Metadata = map[string]any{}
+	}
+	metadata, err := json.Marshal(log.Metadata)
+	if err != nil {
+		metadata = []byte(`{}`)
+	}
+	_, err = s.db.Exec(`
+		INSERT INTO audit_logs (id, actor_id, action, resource, metadata, ip, user_agent, success, created_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+	`, log.ID, log.ActorID, log.Action, log.Resource, string(metadata), log.IP, log.UserAgent, log.Success, log.CreatedAt)
 	return err
 }
 
 func (s *PostgresStore) ListAuditLogs() []models.AuditLog {
 	rows, err := s.db.Query(`
-		SELECT id, actor_id, action, resource, ip, user_agent, success, created_at
+		SELECT id, actor_id, action, resource, metadata, ip, user_agent, success, created_at
 		FROM audit_logs
 		ORDER BY created_at DESC
 		LIMIT 500
@@ -446,7 +576,11 @@ func (s *PostgresStore) ListAuditLogs() []models.AuditLog {
 	logs := []models.AuditLog{}
 	for rows.Next() {
 		var log models.AuditLog
-		if err := rows.Scan(&log.ID, &log.ActorID, &log.Action, &log.Resource, &log.IP, &log.UserAgent, &log.Success, &log.CreatedAt); err == nil {
+		var metadata []byte
+		if err := rows.Scan(&log.ID, &log.ActorID, &log.Action, &log.Resource, &metadata, &log.IP, &log.UserAgent, &log.Success, &log.CreatedAt); err == nil {
+			if len(metadata) > 0 {
+				_ = json.Unmarshal(metadata, &log.Metadata)
+			}
 			logs = append(logs, log)
 		}
 	}
@@ -520,9 +654,14 @@ type sessionScanner interface {
 
 func scanSession(scanner sessionScanner) (models.Session, error) {
 	var session models.Session
-	var email, phone, layoutID, paperSize, frameID sql.NullString
-	var finalKey, finalURL sql.NullString
-	err := scanner.Scan(&session.ID, &session.ShortCode, &email, &phone, &layoutID, &paperSize, &frameID, &session.Status, &finalKey, &finalURL, &session.DownloadURL, &session.CreatedAt, &session.UpdatedAt, &session.ExpiresAt)
+	var email, phone, layoutID, paperSize, frameID, customerTokenHash sql.NullString
+	var finalKey, finalURL, printKey, printURL, animatedKey, animatedURL sql.NullString
+	err := scanner.Scan(
+		&session.ID, &session.ShortCode, &email, &phone, &layoutID, &paperSize, &frameID, &session.Status,
+		&finalKey, &finalURL, &printKey, &printURL,
+		&animatedKey, &animatedURL,
+		&session.DownloadURL, &customerTokenHash, &session.CreatedAt, &session.UpdatedAt, &session.ExpiresAt,
+	)
 	if err != nil {
 		return models.Session{}, err
 	}
@@ -531,8 +670,17 @@ func scanSession(scanner sessionScanner) (models.Session, error) {
 	session.LayoutID = nullableStringPtr(layoutID)
 	session.PaperSize = nullableStringPtr(paperSize)
 	session.FrameID = nullableStringPtr(frameID)
+	if customerTokenHash.Valid {
+		session.CustomerTokenHash = customerTokenHash.String
+	}
 	if finalURL.Valid {
 		session.FinalImage = &models.StoredImage{Key: finalKey.String, URL: finalURL.String}
+	}
+	if printURL.Valid {
+		session.PrintImage = &models.StoredImage{Key: printKey.String, URL: printURL.String}
+	}
+	if animatedURL.Valid {
+		session.AnimatedImage = &models.StoredImage{Key: animatedKey.String, URL: animatedURL.String}
 	}
 	return session, nil
 }
@@ -556,7 +704,23 @@ type paymentScanner interface {
 
 func scanPayment(scanner paymentScanner) (models.Payment, error) {
 	var payment models.Payment
-	err := scanner.Scan(&payment.ID, &payment.SessionID, &payment.Provider, &payment.Amount, &payment.Currency, &payment.Status, &payment.CreatedAt, &payment.UpdatedAt)
+	var providerRef, snapToken, checkoutURL sql.NullString
+	err := scanner.Scan(
+		&payment.ID,
+		&payment.SessionID,
+		&payment.Provider,
+		&payment.Amount,
+		&payment.Currency,
+		&payment.Status,
+		&providerRef,
+		&snapToken,
+		&checkoutURL,
+		&payment.CreatedAt,
+		&payment.UpdatedAt,
+	)
+	payment.ProviderRef = nullableStringPtr(providerRef)
+	payment.SnapToken = nullableStringPtr(snapToken)
+	payment.CheckoutURL = nullableStringPtr(checkoutURL)
 	return payment, err
 }
 

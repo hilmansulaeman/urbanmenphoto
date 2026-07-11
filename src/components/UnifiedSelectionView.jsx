@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { PHOTO_MODES, FRAMES } from '../utils/photoConfig.js';
-import { fetchCustomFrames } from '../utils/customFrameConfig.js';
+import { fetchCustomFrames, recordFrameUsage } from '../utils/customFrameConfig.js';
 
 const PREMIUM_FRAME_PRICE = 5000;
 const SPECIAL_FRAME_PRICE = 10000;
@@ -26,6 +26,7 @@ export default function UnifiedSelectionView({ onNext, onBack }) {
     let addonPrice = 0;
     if (selectedFrame.type === 'premium') addonPrice += PREMIUM_FRAME_PRICE;
     if (selectedFrame.type === 'special') addonPrice += SPECIAL_FRAME_PRICE;
+    recordFrameUsage(selectedFrame.id);
 
     onNext({ template: selectedMode, frame: selectedFrame, addonPrice });
   };

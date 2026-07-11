@@ -1,6 +1,6 @@
 package store
 
-import "urbanmenphoto/backend/internal/models"
+import "urbanmenphoto/backend/app/models"
 
 type Store interface {
 	ListSessions() []models.Session
@@ -25,6 +25,10 @@ type Store interface {
 	ListFrames() []models.Frame
 	UpsertFrame(frame models.Frame) error
 	DeleteFrame(id string) error
+
+	ListVouchers() []models.Voucher
+	UpsertVoucher(voucher models.Voucher) error
+	DeleteVoucher(id string) error
 
 	FindAdminUserByEmail(email string) (models.AdminUser, bool)
 	FindAdminUserByID(id string) (models.AdminUser, bool)

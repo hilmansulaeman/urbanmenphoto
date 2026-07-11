@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"sync"
 
-	"urbanmenphoto/backend/internal/models"
+	"urbanmenphoto/backend/app/models"
 )
 
 type JSONStore struct {
@@ -22,6 +22,7 @@ type database struct {
 	Payments      []models.Payment      `json:"payments"`
 	PaymentLogs   []models.PaymentLog   `json:"paymentLogs"`
 	Frames        []models.Frame        `json:"frames"`
+	Vouchers      []models.Voucher      `json:"vouchers"`
 	AdminUsers    []models.AdminUser    `json:"adminUsers"`
 	AdminTokens   []models.AdminToken   `json:"adminTokens"`
 	AuditLogs     []models.AuditLog     `json:"auditLogs"`
@@ -41,6 +42,7 @@ func NewJSONStore(dataDir string) (*JSONStore, error) {
 			Payments:      []models.Payment{},
 			PaymentLogs:   []models.PaymentLog{},
 			Frames:        []models.Frame{},
+			Vouchers:      []models.Voucher{},
 			AdminUsers:    []models.AdminUser{},
 			AdminTokens:   []models.AdminToken{},
 			AuditLogs:     []models.AuditLog{},
@@ -296,6 +298,43 @@ func (s *JSONStore) DeleteFrame(id string) error {
 	for index, frame := range s.data.Frames {
 		if frame.ID == id {
 			s.data.Frames = append(s.data.Frames[:index], s.data.Frames[index+1:]...)
+			return s.persist()
+		}
+	}
+	return os.ErrNotExist
+}
+
+func (s *JSONStore) ListVouchers() []models.Voucher {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	vouchers := make([]models.Voucher, len(s.data.Vouchers))
+	copy(vouchers, s.data.Vouchers)
+	return vouchers
+}
+
+func (s *JSONStore) UpsertVoucher(voucher models.Voucher) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for index, item := range s.data.Vouchers {
+		if item.ID == voucher.ID {
+			s.data.Vouchers[index] = voucher
+			return s.persist()
+		}
+	}
+
+	s.data.Vouchers = append([]models.Voucher{voucher}, s.data.Vouchers...)
+	return s.persist()
+}
+
+func (s *JSONStore) DeleteVoucher(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for index, voucher := range s.data.Vouchers {
+		if voucher.ID == id {
+			s.data.Vouchers = append(s.data.Vouchers[:index], s.data.Vouchers[index+1:]...)
 			return s.persist()
 		}
 	}

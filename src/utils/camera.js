@@ -1,16 +1,46 @@
-export async function getCameraStream(facingMode = 'user') {
+export async function getCameraStream(cameraOptions = 'user') {
   if (!navigator.mediaDevices?.getUserMedia) {
     throw new Error('Browser ini belum mendukung akses kamera.');
   }
 
+  const options = typeof cameraOptions === 'string'
+    ? { facingMode: cameraOptions }
+    : (cameraOptions || {});
+
+  const videoConstraints = {
+    width: { ideal: 1440 },
+    height: { ideal: 1080 },
+  };
+
+  if (options.deviceId) {
+    videoConstraints.deviceId = { exact: options.deviceId };
+  } else {
+    videoConstraints.facingMode = { ideal: options.facingMode || 'user' };
+  }
+
   return navigator.mediaDevices.getUserMedia({
-    video: {
-      facingMode: { ideal: facingMode },
-      width: { ideal: 1440 },
-      height: { ideal: 1080 },
-    },
+    video: videoConstraints,
     audio: false,
   });
+}
+
+export async function listVideoDevices() {
+  if (!navigator.mediaDevices?.enumerateDevices) {
+    throw new Error('Browser ini belum mendukung daftar kamera.');
+  }
+
+  const devices = await navigator.mediaDevices.enumerateDevices();
+  return devices
+    .filter(device => device.kind === 'videoinput')
+    .map((device, index) => ({
+      deviceId: device.deviceId,
+      label: device.label || `Camera ${index + 1}`,
+      groupId: device.groupId,
+    }));
+}
+
+export function stopStream(stream) {
+  stream?.getTracks?.().forEach(track => track.stop());
 }
 
 export function captureVideoFrame(videoElement, options = {}) {

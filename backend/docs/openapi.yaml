@@ -49,6 +49,7 @@ paths:
       security: []
       parameters:
         - $ref: "#/components/parameters/SessionId"
+        - $ref: "#/components/parameters/CustomerSessionToken"
       responses:
         "200":
           description: Session
@@ -62,6 +63,7 @@ paths:
       security: []
       parameters:
         - $ref: "#/components/parameters/SessionId"
+        - $ref: "#/components/parameters/CustomerSessionToken"
       requestBody:
         required: true
         content:
@@ -78,6 +80,7 @@ paths:
       security: []
       parameters:
         - $ref: "#/components/parameters/SessionId"
+        - $ref: "#/components/parameters/CustomerSessionToken"
       requestBody:
         required: true
         content:
@@ -94,6 +97,7 @@ paths:
       security: []
       parameters:
         - $ref: "#/components/parameters/SessionId"
+        - $ref: "#/components/parameters/CustomerSessionToken"
       requestBody:
         required: true
         content:
@@ -110,6 +114,7 @@ paths:
       security: []
       parameters:
         - $ref: "#/components/parameters/SessionId"
+        - $ref: "#/components/parameters/CustomerSessionToken"
       responses:
         "200":
           description: Expired session
@@ -138,6 +143,8 @@ paths:
       tags: [Payments]
       summary: Create a payment record
       security: []
+      parameters:
+        - $ref: "#/components/parameters/CustomerSessionToken"
       requestBody:
         required: true
         content:
@@ -421,6 +428,13 @@ components:
       required: true
       schema:
         type: string
+    CustomerSessionToken:
+      name: x-session-token
+      in: header
+      required: true
+      description: Customer session token returned once by POST /api/sessions.
+      schema:
+        type: string
   schemas:
     CreateSessionRequest:
       type: object
@@ -446,11 +460,19 @@ components:
         frameId: { type: string, nullable: true }
         finalImage:
           type: string
-          description: Data URL image, for example data:image/png;base64,...
+          description: Data URL image. Only image/jpeg, image/png, and image/webp are accepted. Decoded image max size is 8 MB.
+        printImage:
+          type: string
+          description: Data URL print image. Only image/jpeg, image/png, and image/webp are accepted. Decoded image max size is 8 MB.
+        animatedImage:
+          type: string
+          description: Data URL animated result. image/gif, image/jpeg, image/png, and image/webp are accepted. Decoded image max size is 8 MB.
         images:
           type: array
+          maxItems: 16
           items:
             type: string
+            description: Data URL image. Only image/jpeg, image/png, and image/webp are accepted. Decoded image max size is 8 MB.
     SendLinkRequest:
       type: object
       properties:
@@ -564,6 +586,9 @@ components:
           type: array
           items: { type: string }
         downloadUrl: { type: string }
+        customerToken:
+          type: string
+          description: Returned only when a session is created. Send it as x-session-token for customer session mutations.
         createdAt: { type: string, format: date-time }
         updatedAt: { type: string, format: date-time }
         expiresAt: { type: string, format: date-time }

@@ -41,9 +41,19 @@ PUBLIC_BASE_URL=http://localhost:8787
 ALLOWED_ORIGINS=http://localhost:5173,http://localhost:4173
 ADMIN_TOKEN_TTL_HOURS=12
 PAYMENT_WEBHOOK_SECRET=secret-webhook-key
-SESSION_TTL_DAYS=7
-MAX_BODY_BYTES=15728640
+MIDTRANS_ENVIRONMENT=sandbox
+MIDTRANS_SERVER_KEY=SB-Mid-server-xxxx
+MIDTRANS_CLIENT_KEY=SB-Mid-client-xxxx
+MAX_BODY_BYTES=41943040
+CLEANUP_INTERVAL_MINUTES=60
 DATABASE_URL=
+```
+
+Frontend juga perlu client key untuk memuat Snap.js:
+
+```bash
+VITE_MIDTRANS_ENVIRONMENT=sandbox
+VITE_MIDTRANS_CLIENT_KEY=SB-Mid-client-xxxx
 ```
 
 Admin pertama tidak ditaruh di `.env`. Buat admin lewat CLI supaya password langsung disimpan sebagai hash di database/storage:
@@ -90,17 +100,36 @@ Lalu payment gateway/backend caller harus mengirim:
 x-webhook-secret: dev-webhook-secret
 ```
 
+Untuk Midtrans Snap, isi `MIDTRANS_SERVER_KEY` di backend dan `VITE_MIDTRANS_CLIENT_KEY` di frontend. Pasang notification URL di dashboard Midtrans:
+
+```text
+http://localhost:8787/api/payments/midtrans/webhook
+```
+
+Saat production, ganti `PUBLIC_BASE_URL` dan notification URL ke domain publik backend, lalu set:
+
+```bash
+MIDTRANS_ENVIRONMENT=production
+VITE_MIDTRANS_ENVIRONMENT=production
+```
+
 Proteksi dasar yang sudah aktif:
 
 - Rate limit per IP untuk login admin, create payment, payment webhook, dan send link.
 - Limit request body lewat `MAX_BODY_BYTES`.
-- Validasi email, phone, channel, provider, currency, amount, status payment, dan mime image.
+- Validasi email, phone, channel, provider, currency, amount, status payment, dan upload foto.
+- Upload/finalisasi foto statis hanya menerima data URL `image/jpeg`, `image/png`, atau `image/webp`, maksimal 16 foto mentah dan 8 MB per image setelah decode.
+- Hasil bergerak customer disimpan sebagai `animatedImage` dan menerima data URL `image/gif`, `image/jpeg`, `image/png`, atau `image/webp`.
 - Admin route wajib memakai bearer token hasil login email/password.
+- Customer session route sensitif wajib memakai `x-session-token` dari response `POST /api/sessions`.
 - CORS dibatasi via `ALLOWED_ORIGINS`.
 - Security headers aktif.
 - Admin token disimpan sebagai SHA-256 hash, bukan token mentah.
-- Audit log admin/payment webhook tersimpan.
+- Customer session token disimpan sebagai SHA-256 hash, bukan token mentah.
+- Audit log admin, customer session, customer payment, dan payment webhook tersimpan.
 - Login lockout setelah gagal berulang.
+- Retention session/gallery fixed 7 hari. Setelah expired, API gallery dan file `/files/sessions/...` tidak bisa diakses lagi.
+- Cleanup otomatis menghapus session/file expired sesuai `CLEANUP_INTERVAL_MINUTES` (`0` untuk disable).
 
 ## PostgreSQL
 
@@ -147,6 +176,7 @@ POST /api/sessions/:id/expire
 POST /api/payments
 GET /api/payments/:id
 POST /api/payments/:id/webhook
+POST /api/payments/midtrans/webhook
 GET /api/frames
 GET /api/admin/sessions
 GET /api/admin/sessions/:id
@@ -170,6 +200,14 @@ POST /api/admin/frames
 PUT /api/admin/frames/:id
 DELETE /api/admin/frames/:id
 ```
+
+`POST /api/sessions` mengembalikan `customerToken` satu kali. Kirim token tersebut sebagai header:
+
+```text
+x-session-token: <customer-token>
+```
+
+Header ini wajib untuk `GET/PATCH /api/sessions/:id`, `POST /api/sessions/:id/finalize`, `POST /api/sessions/:id/send-link`, `POST /api/sessions/:id/expire`, dan `POST /api/payments`.
 
 ## Data Lokal
 

@@ -1,5 +1,5 @@
 import { getFrameSettings } from './frameConfig.js';
-import { DEFAULT_FRAME_HEIGHT, DEFAULT_FRAME_WIDTH, fetchCustomFrames, normalizeFrameConfig } from './customFrameConfig.js';
+import { DEFAULT_FRAME_HEIGHT, DEFAULT_FRAME_WIDTH, fetchCustomFrames, normalizeFrameConfig, validateFrameConfig } from './customFrameConfig.js';
 
 export const TIERS = [
   { id: 'basic', name: 'Basic', pricePerHead: 35000, poseLimit: 8, printLimit: 1 },
@@ -38,11 +38,11 @@ export const PHOTO_MODES = [
 ];
 
 export const PAPER_SIZES = [
-  { id: 'strip-2x6', name: 'Strip 2x6', width: 600, height: 1800, description: 'Strip photobooth 2 x 6 inch' },
-  { id: '4r', name: '4R', width: 1200, height: 1800, description: 'Ukuran cetak 4 x 6 inch' },
-  { id: '2r', name: '2R', width: 750, height: 1050, description: 'Ukuran cetak 2.5 x 3.5 inch' },
-  { id: '3r', name: '3R', width: 1050, height: 1500, description: 'Ukuran cetak 3.5 x 5 inch' },
-  { id: '5r', name: '5R', width: 1500, height: 2100, description: 'Ukuran cetak 5 x 7 inch' },
+  { id: 'strip-2x6', name: 'Strip 2x6', width: 600, height: 1800, inchWidth: 2, inchHeight: 6, description: 'Strip photobooth 2 x 6 inch' },
+  { id: '4r', name: '4R', width: 1200, height: 1800, inchWidth: 4, inchHeight: 6, description: 'Ukuran cetak 4 x 6 inch' },
+  { id: '2r', name: '2R', width: 750, height: 1050, inchWidth: 2.5, inchHeight: 3.5, description: 'Ukuran cetak 2.5 x 3.5 inch' },
+  { id: '3r', name: '3R', width: 1050, height: 1500, inchWidth: 3.5, inchHeight: 5, description: 'Ukuran cetak 3.5 x 5 inch' },
+  { id: '5r', name: '5R', width: 1500, height: 2100, inchWidth: 5, inchHeight: 7, description: 'Ukuran cetak 5 x 7 inch' },
 ];
 
 export const SAWERIA_QR_URL = 'https://saweria.co/widgets/qr?streamKey=7755a5f97b72d7496a127ffe24b563e8';
@@ -112,6 +112,20 @@ export function getPhotoCardLayout(modeId, paperSizeId = '4r') {
   };
 }
 
+export function getPrintPaper(paperSizeId = '4r', orientation = 'portrait') {
+  const paper = PAPER_SIZES.find(size => size.id === paperSizeId) || PAPER_SIZES[1];
+  const landscape = orientation === 'landscape';
+  const shouldSwap = landscape && paper.height > paper.width;
+  return {
+    ...paper,
+    width: shouldSwap ? paper.height : paper.width,
+    height: shouldSwap ? paper.width : paper.height,
+    inchWidth: shouldSwap ? paper.inchHeight : paper.inchWidth,
+    inchHeight: shouldSwap ? paper.inchWidth : paper.inchHeight,
+    orientation: landscape ? 'landscape' : 'portrait',
+  };
+}
+
 export async function composePhotoCard({ photos, filterId, frameId, frame, frameConfig, slotState, modeId, paperSizeId = '4r', mimeType = 'image/png' }) {
   if (!photos?.length) return null;
 
@@ -130,7 +144,8 @@ export async function composePhotoCard({ photos, filterId, frameId, frame, frame
     customFrame = fetchedFrame ? normalizeFrameConfig(fetchedFrame) : null;
   }
 
-  const hasCustomSlots = customFrame?.slots?.length > 0;
+  const customFrameValidation = customFrame ? validateFrameConfig(customFrame) : null;
+  const hasCustomSlots = customFrameValidation?.isUsable && customFrame?.slots?.length > 0;
 
   // If the custom frame JSON provides specific canvas dimensions, use them.
   // Otherwise: custom frames default to 1080x1920 (Figma export default), grid frames use layout.
@@ -155,8 +170,10 @@ export async function composePhotoCard({ photos, filterId, frameId, frame, frame
     // --- DRAW CUSTOM SLOTS ---
     customFrame.slots.forEach((slot, index) => {
       const transform = slotState?.[index] || {};
-      const photoIndex = Number.isInteger(transform.photoIdx) ? transform.photoIdx : index;
+      if (!Number.isInteger(transform.photoIdx)) return;
+      const photoIndex = transform.photoIdx;
       const img = loadedImages[((photoIndex % loadedImages.length) + loadedImages.length) % loadedImages.length];
+      if (!img) return;
       const baseFilter = getFilterStyle(filterId);
       const slotFilter = getEditorFilterStyle(transform.filter || 'ORIGINAL');
       const combinedFilter = [baseFilter, slotFilter].filter((filter) => filter && filter !== 'none').join(' ') || 'none';
@@ -187,8 +204,10 @@ export async function composePhotoCard({ photos, filterId, frameId, frame, frame
 
     for (let i = 0; i < layout.photoCount; i++) {
       const transform = slotState?.[i] || {};
-      const photoIndex = Number.isInteger(transform.photoIdx) ? transform.photoIdx : i;
+      if (!Number.isInteger(transform.photoIdx)) continue;
+      const photoIndex = transform.photoIdx;
       const img = loadedImages[((photoIndex % loadedImages.length) + loadedImages.length) % loadedImages.length];
+      if (!img) continue;
       const row = Math.floor(i / layout.columns);
       const col = i % layout.columns;
       const x = layout.padding + col * (pWidth + layout.gap);
@@ -213,7 +232,7 @@ export async function composePhotoCard({ photos, filterId, frameId, frame, frame
     }
   }
 
-  if (isCustom) {
+  if (isCustom && hasCustomSlots) {
     if (customFrame?.frameImage) {
       try {
         // Must wait for image to load to draw it
@@ -227,6 +246,97 @@ export async function composePhotoCard({ photos, filterId, frameId, frame, frame
     drawFrame(ctx, resolvedFrameId, canvas.width, canvas.height);
   }
   
+  return canvas.toDataURL(mimeType, 0.95);
+}
+
+export async function composePhotoOutputs(options) {
+  const digitalImage = await composePhotoCard(options);
+  if (!digitalImage) {
+    return { digitalImage: null, printImage: null, printMeta: null };
+  }
+
+  const customFrame = options.frameConfig
+    ? normalizeFrameConfig(options.frameConfig)
+    : options.frame
+      ? normalizeFrameConfig(options.frame)
+      : null;
+
+  const templateType = customFrame?.templateType || 'print_sheet';
+  const selectedPaper = getPrintPaper(options.paperSizeId || customFrame?.paperSize || '4r', customFrame?.orientation || options.orientation || 'portrait');
+  const printMode = customFrame?.printMode || 'auto';
+  const printCopies = Math.max(1, Math.min(Number(customFrame?.printCopies || options.printCopies || 1), 4));
+  const shouldDuplicateStrip = templateType === 'strip' && printMode !== 'same' && selectedPaper.id !== 'strip-2x6';
+
+  if (!shouldDuplicateStrip) {
+    return {
+      digitalImage,
+      printImage: digitalImage,
+      printMeta: {
+        paperSizeId: selectedPaper.id,
+        paperName: selectedPaper.name,
+        width: selectedPaper.width,
+        height: selectedPaper.height,
+        inchWidth: selectedPaper.inchWidth,
+        inchHeight: selectedPaper.inchHeight,
+        orientation: selectedPaper.orientation,
+        templateType,
+        printMode,
+        copies: 1,
+      },
+    };
+  }
+
+  const printImage = await composeStripPrintSheet({
+    stripDataUrl: digitalImage,
+    paper: selectedPaper,
+    copies: printCopies,
+    mimeType: options.mimeType || 'image/png',
+  });
+
+  return {
+    digitalImage,
+    printImage,
+    printMeta: {
+      paperSizeId: selectedPaper.id,
+      paperName: selectedPaper.name,
+      width: selectedPaper.width,
+      height: selectedPaper.height,
+      inchWidth: selectedPaper.inchWidth,
+      inchHeight: selectedPaper.inchHeight,
+      orientation: selectedPaper.orientation,
+      templateType,
+      printMode,
+      copies: printCopies,
+    },
+  };
+}
+
+async function composeStripPrintSheet({ stripDataUrl, paper, copies = 2, mimeType = 'image/png' }) {
+  paper = paper || getPrintPaper('4r');
+  const canvas = document.createElement('canvas');
+  canvas.width = paper.width;
+  canvas.height = paper.height;
+
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  const stripImage = await loadImage(stripDataUrl);
+  const safeCopies = Math.max(1, Math.min(Number(copies) || 2, 4));
+  const gap = Math.round(canvas.width * 0.035);
+  const padding = Math.round(canvas.width * 0.05);
+  const slotWidth = (canvas.width - padding * 2 - gap * (safeCopies - 1)) / safeCopies;
+  const slotHeight = canvas.height - padding * 2;
+  const scale = Math.min(slotWidth / stripImage.naturalWidth, slotHeight / stripImage.naturalHeight);
+  const drawWidth = stripImage.naturalWidth * scale;
+  const drawHeight = stripImage.naturalHeight * scale;
+  const y = (canvas.height - drawHeight) / 2;
+
+  for (let i = 0; i < safeCopies; i += 1) {
+    const x = padding + i * (slotWidth + gap) + (slotWidth - drawWidth) / 2;
+    ctx.drawImage(stripImage, x, y, drawWidth, drawHeight);
+  }
+
   return canvas.toDataURL(mimeType, 0.95);
 }
 

@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { PHOTO_MODES, PAPER_SIZES, FRAMES } from '../utils/photoConfig.js';
-import { fetchCustomFrames } from '../utils/customFrameConfig.js';
+import { fetchCustomFrames, recordFrameUsage } from '../utils/customFrameConfig.js';
 
 const MenuIcon = () => (
   <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" style={{width: 16, height: 16}}>
@@ -9,6 +9,7 @@ const MenuIcon = () => (
 );
 
 const defaultTransform = { x: 0, y: 0, zoom: 1, rotate: 0, flipH: false, flipV: false, filter: 'ORIGINAL' };
+const createEmptySlot = () => ({ photoIdx: null, ...defaultTransform });
 
 const FILTER_CATEGORIES = {
   ALL: [],
@@ -83,17 +84,18 @@ export default function StudioEditorView({ photos = [], onNext }) {
 
   const [selectedSlot, setSelectedSlot] = useState(0);
   const [slots, setSlots] = useState(() => {
-    return Array.from({ length: 4 }, (_, i) => ({ photoIdx: i, ...defaultTransform }));
+    return Array.from({ length: 4 }, () => createEmptySlot());
   });
 
   const hasFrameSlots = activeFrame.slots && Array.isArray(activeFrame.slots) && activeFrame.slots.length > 0;
 
-  // Auto-sync slot count & auto-fill photos when frame or layout changes
+  // Keep slot count synced with the selected template, but leave every slot
+  // empty until the customer intentionally chooses a photo for it.
   useEffect(() => {
     const nextSlotCount = activeFrame.slots && Array.isArray(activeFrame.slots) && activeFrame.slots.length > 0
       ? activeFrame.slots.length
       : selectedLayout.count;
-    setSlots(Array.from({ length: nextSlotCount }, (_, i) => ({ photoIdx: i, ...defaultTransform })));
+    setSlots(Array.from({ length: nextSlotCount }, () => createEmptySlot()));
     setSelectedSlot(0);
   }, [activeFrame, selectedLayout]);
 
@@ -126,6 +128,7 @@ export default function StudioEditorView({ photos = [], onNext }) {
   };
 
   const handleFinish = () => {
+    recordFrameUsage(activeFrame.id);
     const frameConfig = hasFrameSlots ? {
       frameImage: activeFrame.frameImage || activeFrame.url,
       width: activeFrame.width || 1080,
@@ -150,6 +153,8 @@ export default function StudioEditorView({ photos = [], onNext }) {
   };
 
   const currentSlot = slots[selectedSlot];
+  const selectedSlotNumber = selectedSlot + 1;
+  const filledSlotCount = slots.filter(slot => Number.isInteger(slot.photoIdx)).length;
 
   const updateSlot = (key, val) => {
     setSlots(prev => {
@@ -163,6 +168,18 @@ export default function StudioEditorView({ photos = [], onNext }) {
     setSlots(prev => {
       const newSlots = [...prev];
       newSlots[selectedSlot] = { photoIdx: newSlots[selectedSlot].photoIdx, ...defaultTransform };
+      return newSlots;
+    });
+  };
+
+  const assignPhotoToSelectedSlot = (photoIdx) => {
+    if (!Number.isInteger(photoIdx) || !availablePhotos[photoIdx]) return;
+    setSlots(prev => {
+      const newSlots = [...prev];
+      newSlots[selectedSlot] = {
+        ...newSlots[selectedSlot],
+        photoIdx,
+      };
       return newSlots;
     });
   };
@@ -194,7 +211,7 @@ export default function StudioEditorView({ photos = [], onNext }) {
   return (
     <section className="studio-fullscreen-workspace" style={{
       display: 'grid',
-      gridTemplateColumns: '260px minmax(0, 1fr) 380px',
+      gridTemplateColumns: '260px minmax(0, 1fr) 390px',
       gap: '1.5rem',
       maxWidth: '1400px',
       margin: '0 auto',
@@ -204,6 +221,15 @@ export default function StudioEditorView({ photos = [], onNext }) {
       
       {/* Left Column: Thumbnails */}
       <div style={{ display: 'flex', flexDirection: 'column', gap: '0.8rem', height: '100%', overflowY: 'auto', paddingBottom: '2rem' }}>
+        {(step === 'edit_photo' || step === 'filter_photo') && (
+          <div style={{ flex: '0 0 auto', padding: '0.85rem', borderRadius: '14px', background: '#111827', color: 'white', border: '1px solid #374151' }}>
+            <div style={{ fontSize: '0.72rem', color: '#9ca3af', fontWeight: 900, textTransform: 'uppercase', marginBottom: '0.25rem' }}>Slot aktif</div>
+            <div style={{ fontSize: '1rem', fontWeight: 900 }}>Kotak {selectedSlotNumber}</div>
+            <div style={{ fontSize: '0.78rem', color: '#d1d5db', marginTop: '0.35rem', lineHeight: 1.35 }}>
+              Klik kotak di template, lalu klik foto yang ingin dimasukkan.
+            </div>
+          </div>
+        )}
         {step === 'video_settings' ? (
           <div style={{ width: '100%', aspectRatio: '16/9', background: '#374151', borderRadius: '4px', border: '2px solid #9ca3af', overflow: 'hidden' }}>
              <img src={currentVideoFrameSrc} style={{ width: '100%', height: '100%', objectFit: 'cover', filter: getMockCssFilter(videoSettings.filter) }} />
@@ -216,22 +242,27 @@ export default function StudioEditorView({ photos = [], onNext }) {
                 key={idx} 
                 onClick={() => {
                   if (step === 'edit_photo' || step === 'filter_photo') {
-                    updateSlot('photoIdx', idx);
+                    assignPhotoToSelectedSlot(idx);
                   }
                 }}
                 style={{
                   position: 'relative',
                   flex: '0 0 auto',
-                  height: '140px',
+                  height: '132px',
                   background: photo ? 'transparent' : '#e5e7eb',
                   borderRadius: '16px',
-                  border: photo ? '4px solid #374151' : '4px dashed #9ca3af',
+                  border: photo ? '3px solid #374151' : '3px dashed #9ca3af',
                   overflow: 'hidden',
-                  cursor: (step === 'edit_photo' || step === 'filter_photo') ? 'pointer' : 'default',
+                  cursor: (step === 'edit_photo' || step === 'filter_photo') && photo ? 'pointer' : 'default',
                   opacity: (step === 'choose_frame' || step === 'edit_video') ? 0.7 : 1
               }}>
                 {photo && (
                   <img src={photo.src} alt={`Shot ${idx+1}`} style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }} />
+                )}
+                {photo && (
+                  <div style={{ position: 'absolute', left: '0.55rem', top: '0.5rem', background: 'rgba(17,24,39,0.78)', color: 'white', borderRadius: '999px', padding: '0.2rem 0.55rem', fontSize: '0.72rem', fontWeight: 900 }}>
+                    Foto {idx + 1}
+                  </div>
                 )}
               </div>
             );
@@ -318,7 +349,7 @@ export default function StudioEditorView({ photos = [], onNext }) {
                  width: `${(slotConfig.width / fWidth) * 100}%`,
                  height: `${(slotConfig.height / fHeight) * 100}%`,
                  borderRadius: slotConfig.borderRadius ? `${slotConfig.borderRadius}px` : '0',
-                 overflow: 'hidden',
+                 overflow: 'visible',
                };
                
                // Use standard slot state mapping
@@ -355,30 +386,40 @@ export default function StudioEditorView({ photos = [], onNext }) {
                    }}
                    style={{
                      ...slotStyle,
-                     background: '#d1d5db',
-                     border: isSelected ? '4px solid #3b82f6' : 'none',
                      cursor: (step === 'choose_frame' || step === 'edit_video') ? 'default' : 'pointer',
-                     overflow: 'hidden',
                      display: 'flex',
                      alignItems: 'center',
                      justifyContent: 'center',
                      zIndex: 5
                    }}
                  >
-                   {photo ? (
-                     <img 
-                       src={photo.src} 
-                       style={{
-                         width: '100%',
-                         height: '100%',
-                         objectFit: 'cover',
-                         filter: combinedFilter,
-                         transition: step === 'edit_video' ? 'none' : 'filter 0.3s, transform 0.3s',
-                         transform: `translate(${stateSlot.x}px, ${stateSlot.y}px) scale(${stateSlot.zoom}) rotate(${stateSlot.rotate}deg) scaleX(${stateSlot.flipH ? -1 : 1}) scaleY(${stateSlot.flipV ? -1 : 1})`
-                       }}
-                     />
-                   ) : (
-                     <span style={{ fontSize: '2rem', color: '#fff', fontWeight: 'bold' }}>{i + 1}</span>
+                   <div style={{
+                     position: 'absolute',
+                     inset: 0,
+                     borderRadius: slotConfig.borderRadius ? `${slotConfig.borderRadius}px` : '0',
+                     overflow: 'hidden',
+                     background: photo ? 'transparent' : 'rgba(209, 213, 219, 0.84)',
+                     zIndex: 1
+                   }}>
+                     {photo && (
+                       <img 
+                         src={photo.src} 
+                         style={{
+                           width: '100%',
+                           height: '100%',
+                           objectFit: 'cover',
+                           filter: combinedFilter,
+                           transition: step === 'edit_video' ? 'none' : 'filter 0.3s, transform 0.3s',
+                           transform: `translate(${stateSlot.x}px, ${stateSlot.y}px) scale(${stateSlot.zoom}) rotate(${stateSlot.rotate}deg) scaleX(${stateSlot.flipH ? -1 : 1}) scaleY(${stateSlot.flipV ? -1 : 1})`
+                         }}
+                       />
+                     )}
+                   </div>
+                   {isSelected && (
+                     <div style={{ position: 'absolute', inset: '-3px', borderRadius: slotConfig.borderRadius ? `${slotConfig.borderRadius + 3}px` : '4px', border: '3px solid #f97316', boxShadow: '0 0 0 2px rgba(0,0,0,0.2)', pointerEvents: 'none', zIndex: 3 }} />
+                   )}
+                   {!photo && (
+                     <span style={{ position: 'relative', zIndex: 4, fontSize: '0.7rem', color: '#fff', fontWeight: 'bold', textAlign: 'center', lineHeight: 1.2, opacity: 0.95, textShadow: '0 1px 3px rgba(0,0,0,0.45)' }}>PILIH<br />FOTO {i + 1}</span>
                    )}
                  </div>
                )
@@ -427,7 +468,7 @@ export default function StudioEditorView({ photos = [], onNext }) {
                        }}
 	                       style={{
 	                         background: '#d1d5db',
-                         border: isSelected ? '4px solid #3b82f6' : 'none',
+                         border: isSelected ? '4px solid #f97316' : '1px dashed rgba(255,255,255,0.35)',
                          cursor: (step === 'choose_frame' || step === 'edit_video') ? 'default' : 'pointer',
                          overflow: 'hidden',
                          position: 'relative',
@@ -449,7 +490,7 @@ export default function StudioEditorView({ photos = [], onNext }) {
                            }}
                          />
                        ) : (
-                         <span style={{ fontSize: '2rem', color: '#fff', fontWeight: 'bold' }}>{i + 1}</span>
+                         <span style={{ fontSize: '0.8rem', color: '#fff', fontWeight: 'bold', textAlign: 'center', lineHeight: 1.2, opacity: 0.95 }}>PILIH<br />FOTO {i + 1}</span>
                        )}
                      </div>
                    )
@@ -513,6 +554,9 @@ export default function StudioEditorView({ photos = [], onNext }) {
 	            </div>
 
 	            <div style={{ display: 'grid', gap: '1rem', marginBottom: '1.25rem', flexShrink: 0 }}>
+	              <div style={{ border: '1px solid #27272a', background: '#18181b', borderRadius: '12px', padding: '0.8rem', color: '#d1d5db', fontSize: '0.78rem', lineHeight: 1.35 }}>
+	                Pilih jumlah kotak dan template dulu. Foto tidak akan otomatis masuk; setelah klik selanjutnya, pilih kotak lalu pilih foto.
+	              </div>
 	              <div>
 	                <div style={{ fontSize: '0.72rem', color: '#9ca3af', fontWeight: 'bold', marginBottom: '0.6rem' }}>LAYOUT</div>
 	                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '0.5rem' }}>
@@ -644,6 +688,13 @@ export default function StudioEditorView({ photos = [], onNext }) {
         ) : step === 'edit_photo' ? (
           /* Edit Photo Panel */
           <div style={{ display: 'flex', flexDirection: 'column', height: '100%', gap: '1.5rem' }}>
+            <div style={{ background: '#18181b', border: '1px solid #27272a', borderRadius: '12px', padding: '1rem' }}>
+              <div style={{ color: '#9ca3af', fontSize: '0.72rem', fontWeight: 900, textTransform: 'uppercase', marginBottom: '0.35rem' }}>Isi Template</div>
+              <div style={{ color: 'white', fontSize: '1rem', fontWeight: 900 }}>{filledSlotCount} / {slots.length} kotak terisi</div>
+              <div style={{ color: '#d1d5db', fontSize: '0.78rem', marginTop: '0.45rem', lineHeight: 1.35 }}>
+                Kotak {selectedSlotNumber} sedang dipilih. Pilih foto dari kiri, atau hapus isi kotak ini.
+              </div>
+            </div>
             {/* Horizontal Move */}
             <div>
               <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.7rem', color: '#9ca3af', marginBottom: '0.8rem', fontWeight: 'bold' }}>

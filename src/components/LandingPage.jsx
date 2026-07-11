@@ -47,7 +47,7 @@ const topSteps = [
 
 const bottomSteps = [
   { id: 4, title: 'PILIH BINGKAI', desc: 'Pilih bingkai yang sempurna', icon: icons.crop, num: 4 },
-  { id: 5, title: 'EDIT VIDEO', desc: 'Buat loop video yang menyenangkan', icon: icons.video, num: 5 },
+  { id: 5, title: 'EDIT FOTO dan VIDEO', desc: 'Edit foto dan buat loop video yang menyenangkan', icon: icons.video, num: 5 },
   { id: 6, title: 'DOWNLOAD', desc: 'Dapatkan foto Anda secara instan', icon: icons.download, num: 6 },
 ];
 
@@ -100,4 +100,3 @@ export default function LandingPage({ onStart }) {
     </main>
   );
 }
-

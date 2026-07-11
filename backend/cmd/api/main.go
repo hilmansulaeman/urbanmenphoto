@@ -4,9 +4,9 @@ import (
 	"log"
 	"net/http"
 
-	"urbanmenphoto/backend/internal/config"
-	"urbanmenphoto/backend/internal/httpapi"
-	"urbanmenphoto/backend/internal/store"
+	"urbanmenphoto/backend/app/config"
+	"urbanmenphoto/backend/app/httpapi"
+	"urbanmenphoto/backend/app/store"
 )
 
 func main() {
@@ -21,8 +21,12 @@ func main() {
 	if err != nil {
 		log.Fatalf("init store: %v", err)
 	}
+	if err := httpapi.EnsureBootstrapAdmin(cfg, appStore); err != nil {
+		log.Fatalf("bootstrap admin: %v", err)
+	}
 
 	server := httpapi.NewServer(cfg, appStore)
+	server.StartCleanupWorker()
 	addr := cfg.Host + ":" + cfg.Port
 
 	log.Printf("Urbanmenphoto Go backend running at %s", cfg.PublicBaseURL)

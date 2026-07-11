@@ -12,14 +12,27 @@ type Config struct {
 	Port                 string
 	PublicBaseURL        string
 	PaymentWebhookSecret string
+	MidtransServerKey    string
+	MidtransClientKey    string
+	MidtransEnvironment  string
 	AllowedOrigins       []string
 	DatabaseURL          string
 	DataDir              string
 	StorageDir           string
+	BootstrapAdminEmail  string
+	BootstrapAdminPass   string
+	SMTPHost             string
+	SMTPPort             string
+	SMTPUsername         string
+	SMTPPassword         string
+	MailFrom             string
 	SessionTTLDays       int
 	AdminTokenTTLHrs     int
 	MaxBodyBytes         int64
+	CleanupIntervalMins  int
 }
+
+const SessionRetentionDays = 7
 
 func Load() Config {
 	loadDotEnv()
@@ -33,13 +46,24 @@ func Load() Config {
 		Port:                 port,
 		PublicBaseURL:        getEnv("PUBLIC_BASE_URL", "http://localhost:"+port),
 		PaymentWebhookSecret: os.Getenv("PAYMENT_WEBHOOK_SECRET"),
+		MidtransServerKey:    os.Getenv("MIDTRANS_SERVER_KEY"),
+		MidtransClientKey:    os.Getenv("MIDTRANS_CLIENT_KEY"),
+		MidtransEnvironment:  getEnv("MIDTRANS_ENVIRONMENT", "sandbox"),
 		AllowedOrigins:       splitCSV(os.Getenv("ALLOWED_ORIGINS")),
 		DatabaseURL:          os.Getenv("DATABASE_URL"),
 		DataDir:              getEnv("BACKEND_DATA_DIR", defaultDataDir),
 		StorageDir:           getEnv("BACKEND_STORAGE_DIR", defaultStorageDir),
-		SessionTTLDays:       getEnvInt("SESSION_TTL_DAYS", 7),
+		BootstrapAdminEmail:  strings.ToLower(strings.TrimSpace(os.Getenv("BOOTSTRAP_ADMIN_EMAIL"))),
+		BootstrapAdminPass:   os.Getenv("BOOTSTRAP_ADMIN_PASSWORD"),
+		SMTPHost:             os.Getenv("SMTP_HOST"),
+		SMTPPort:             getEnv("SMTP_PORT", "587"),
+		SMTPUsername:         os.Getenv("SMTP_USERNAME"),
+		SMTPPassword:         os.Getenv("SMTP_PASSWORD"),
+		MailFrom:             getEnv("MAIL_FROM", os.Getenv("SMTP_USERNAME")),
+		SessionTTLDays:       SessionRetentionDays,
 		AdminTokenTTLHrs:     getEnvInt("ADMIN_TOKEN_TTL_HOURS", 12),
-		MaxBodyBytes:         int64(getEnvInt("MAX_BODY_BYTES", 15*1024*1024)),
+		MaxBodyBytes:         int64(getEnvInt("MAX_BODY_BYTES", 40*1024*1024)),
+		CleanupIntervalMins:  getEnvIntAllowZero("CLEANUP_INTERVAL_MINUTES", 60),
 	}
 }
 
@@ -124,5 +148,22 @@ func getEnvInt(key string, fallback int) int {
 	if parsed <= 0 {
 		return fallback
 	}
+	return parsed
+}
+
+func getEnvIntAllowZero(key string, fallback int) int {
+	value := os.Getenv(key)
+	if value == "" {
+		return fallback
+	}
+
+	var parsed int
+	for _, char := range value {
+		if char < '0' || char > '9' {
+			return fallback
+		}
+		parsed = parsed*10 + int(char-'0')
+	}
+
 	return parsed
 }

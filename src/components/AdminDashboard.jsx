@@ -1,14 +1,17 @@
 import { useState, useEffect, useRef } from 'react';
 import { supabase } from '../utils/supabaseClient';
-import { getKioskSettings, saveKioskSettings } from '../utils/kioskConfig.js';
+import { getKioskSettings, getPublicGalleryBaseUrl, saveKioskSettings } from '../utils/kioskConfig.js';
 import { clearTransactions } from '../utils/transactionLogger.js';
 import { getFrameSettings, saveFrameSettings } from '../utils/frameConfig.js';
-import { fetchCustomFrames } from '../utils/customFrameConfig.js';
+import { fetchCustomFrames, setCustomFrameDisabled, validateFrameConfig } from '../utils/customFrameConfig.js';
 import { FRAMES } from '../utils/photoConfig.js';
-import { backendRequest, formatCurrency, formatDateTime } from '../utils/backendApi.js';
+import { BACKEND_API_URL, backendRequest, formatCurrency, formatDateTime, getBackendApiUrl, reportMonitoringError } from '../utils/backendApi.js';
+import { getCameraStream, listVideoDevices, stopStream } from '../utils/camera.js';
+import { clearRecoveryHistory, getRecoveryHistory, getRecoverySession, removeRecoverySession, saveRecoverySession } from '../utils/sessionRecovery.js';
 
 const ADMIN_TOKEN_KEY = 'urbanmenphoto_admin_token';
 const ADMIN_USER_KEY = 'urbanmenphoto_admin_user';
+const ADMIN_EXPIRES_KEY = 'urbanmenphoto_admin_expires_at';
 
 // --- SVG Icons Helper Components ---
 const OverviewIcon = () => (
@@ -82,7 +85,12 @@ const PaymentKeyIcon = () => (
 const MENU_ITEMS = [
   { id: 'overview', label: 'Overview', icon: <OverviewIcon /> },
   { id: 'kiosk', label: 'Kiosk', icon: <KioskIcon /> },
+  { id: 'booth_health', label: 'Booth Health', icon: <StatisticIcon /> },
+  { id: 'monitoring', label: 'Monitoring', icon: <StatisticIcon /> },
+  { id: 'recovery', label: 'Recovery', icon: <TransactionIcon /> },
+  { id: 'storage', label: 'Storage', icon: <GalleryIcon /> },
   { id: 'gallery', label: 'Gallery', icon: <GalleryIcon /> },
+  { id: 'reports', label: 'Reports', icon: <StatisticIcon /> },
   { id: 'statistic', label: 'Statistic', icon: <StatisticIcon /> },
   { id: 'transaction', label: 'Transaction', icon: <TransactionIcon /> },
   { id: 'payments', label: 'Payments', icon: <PaymentKeyIcon /> },
@@ -95,12 +103,150 @@ const MENU_ITEMS = [
   { id: 'payment_key', label: 'Payment Key', icon: <PaymentKeyIcon /> },
 ];
 
-const STAFF_ALLOWED_MENUS = new Set(['gallery', 'statistic', 'transaction', 'frame_photo', 'voucher']);
+const STAFF_ALLOWED_MENUS = new Set(['booth_health', 'monitoring', 'recovery', 'gallery', 'reports', 'statistic', 'transaction', 'payments', 'messages', 'frame_photo']);
+
+const csvEscape = (value) => {
+  if (value == null) return '';
+  if (value instanceof Date) return value.toISOString();
+  const normalized = typeof value === 'object' ? JSON.stringify(value) : String(value);
+  return `"${normalized.replace(/"/g, '""')}"`;
+};
+
+const getNestedValue = (row, path) => {
+  if (!path) return '';
+  return String(path).split('.').reduce((value, key) => value?.[key], row);
+};
+
+const buildCSV = (rows = [], columns = []) => {
+  const headers = columns.map(column => csvEscape(column.label || column.key)).join(',');
+  const body = rows.map(row => columns.map(column => {
+    const value = column.value ? column.value(row) : getNestedValue(row, column.key);
+    return csvEscape(value);
+  }).join(','));
+  return [headers, ...body].join('\n');
+};
+
+const downloadCSV = (filename, rows = [], columns = []) => {
+  const csv = buildCSV(rows, columns);
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(url);
+};
+
+const reportDateStamp = () => new Date().toISOString().slice(0, 10);
+
+const fetchAllAdminRows = async (endpoint, adminToken, extraParams = {}) => {
+  const rows = [];
+  let page = 1;
+  let totalPages = 1;
+
+  do {
+    const params = new URLSearchParams({
+      page: String(page),
+      pageSize: '100',
+      ...extraParams,
+    });
+    const separator = endpoint.includes('?') ? '&' : '?';
+    const data = await backendRequest(`${endpoint}${separator}${params.toString()}`, adminToken);
+    if (Array.isArray(data)) return data;
+
+    const items = Array.isArray(data?.items) ? data.items : [];
+    rows.push(...items);
+    totalPages = Number(data?.totalPages || 1);
+    page += 1;
+  } while (page <= totalPages);
+
+  return rows;
+};
+
+const SESSION_EXPORT_COLUMNS = [
+  { key: 'id', label: 'Session ID' },
+  { key: 'shortCode', label: 'Short Code' },
+  { key: 'status', label: 'Status' },
+  { key: 'email', label: 'Email' },
+  { key: 'phone', label: 'Phone' },
+  { key: 'layoutId', label: 'Layout' },
+  { key: 'paperSize', label: 'Paper Size' },
+  { key: 'frameId', label: 'Frame' },
+  { key: 'downloadUrl', label: 'Download URL' },
+  { key: 'finalImage.url', label: 'Final Image' },
+  { key: 'printImage.url', label: 'Print Image' },
+  { key: 'animatedImage.url', label: 'Animated Image' },
+  { key: 'images', label: 'Original Count', value: row => Array.isArray(row.images) ? row.images.length : 0 },
+  { key: 'createdAt', label: 'Created At', value: row => formatDateTime(row.createdAt) },
+  { key: 'updatedAt', label: 'Updated At', value: row => formatDateTime(row.updatedAt) },
+  { key: 'expiresAt', label: 'Expires At', value: row => formatDateTime(row.expiresAt) },
+];
+
+const PAYMENT_EXPORT_COLUMNS = [
+  { key: 'id', label: 'Payment ID' },
+  { key: 'sessionId', label: 'Session ID' },
+  { key: 'provider', label: 'Provider' },
+  { key: 'amount', label: 'Amount' },
+  { key: 'currency', label: 'Currency' },
+  { key: 'status', label: 'Status' },
+  { key: 'createdAt', label: 'Created At', value: row => formatDateTime(row.createdAt) },
+  { key: 'updatedAt', label: 'Updated At', value: row => formatDateTime(row.updatedAt) },
+];
+
+const TRANSACTION_EXPORT_COLUMNS = [
+  { key: 'id', label: 'Transaction ID' },
+  { key: 'sessionId', label: 'Session ID' },
+  { key: 'provider', label: 'Provider' },
+  { key: 'amount', label: 'Amount' },
+  { key: 'currency', label: 'Currency' },
+  { key: 'status', label: 'Status' },
+  { key: 'createdAt', label: 'Created At', value: row => formatDateTime(row.createdAt) },
+];
+
+const PAYMENT_LOG_EXPORT_COLUMNS = [
+  { key: 'id', label: 'Log ID' },
+  { key: 'paymentId', label: 'Payment ID' },
+  { key: 'sessionId', label: 'Session ID' },
+  { key: 'event', label: 'Event' },
+  { key: 'provider', label: 'Provider' },
+  { key: 'amount', label: 'Amount' },
+  { key: 'currency', label: 'Currency' },
+  { key: 'statusBefore', label: 'Status Before' },
+  { key: 'statusAfter', label: 'Status After' },
+  { key: 'providerRef', label: 'Provider Ref' },
+  { key: 'ip', label: 'IP' },
+  { key: 'userAgent', label: 'User Agent' },
+  { key: 'createdAt', label: 'Created At', value: row => formatDateTime(row.createdAt) },
+];
+
+const MESSAGE_EXPORT_COLUMNS = [
+  { key: 'id', label: 'Message ID' },
+  { key: 'sessionId', label: 'Session ID' },
+  { key: 'channel', label: 'Channel' },
+  { key: 'recipient', label: 'Recipient' },
+  { key: 'downloadUrl', label: 'Download URL' },
+  { key: 'status', label: 'Status' },
+  { key: 'createdAt', label: 'Created At', value: row => formatDateTime(row.createdAt) },
+];
+
+const AUDIT_EXPORT_COLUMNS = [
+  { key: 'id', label: 'Audit ID' },
+  { key: 'actorId', label: 'Actor ID' },
+  { key: 'action', label: 'Action' },
+  { key: 'resource', label: 'Resource' },
+  { key: 'metadata', label: 'Metadata', value: row => row.metadata ? JSON.stringify(row.metadata) : '' },
+  { key: 'ip', label: 'IP' },
+  { key: 'userAgent', label: 'User Agent' },
+  { key: 'success', label: 'Success', value: row => row.success ? 'yes' : 'no' },
+  { key: 'createdAt', label: 'Created At', value: row => formatDateTime(row.createdAt) },
+];
 
 function StatusBadge({ status, before }) {
   const normalized = String(status || 'unknown').toLowerCase();
-  const isSuccess = ['paid', 'success', 'sent', 'completed', 'finalized', 'active'].includes(normalized);
-  const isPending = ['pending', 'created', 'processing', 'queued'].includes(normalized);
+  const isSuccess = ['paid', 'success', 'sent', 'completed', 'finalized', 'active', 'saved', 'local'].includes(normalized);
+  const isPending = ['pending', 'created', 'processing', 'queued', 'waiting', 'saving'].includes(normalized);
   const isFailed = ['failed', 'expired', 'cancelled', 'canceled', 'error', 'inactive'].includes(normalized);
   const style = isSuccess
     ? { background: '#d1fae5', color: '#047857', border: '1px solid #a7f3d0' }
@@ -129,13 +275,255 @@ function StatusBadge({ status, before }) {
   );
 }
 
+const getPaginationItems = (currentPage, totalPages) => {
+  const total = Math.max(1, Number(totalPages || 1));
+  const current = Math.min(Math.max(1, Number(currentPage || 1)), total);
+  if (total <= 5) return Array.from({ length: total }, (_, index) => index + 1);
+  if (current <= 3) return [1, 2, 3, 'ellipsis', total];
+  if (current >= total - 2) return [1, 'ellipsis', total - 2, total - 1, total];
+  return [1, 'ellipsis-left', current, 'ellipsis-right', total];
+};
+
+function AdminPagination({ page, totalPages, pageSize, total, onPageChange, onPageSizeChange }) {
+  const safeTotal = Math.max(0, Number(total || 0));
+  const safePageSize = Math.max(1, Number(pageSize || 10));
+  const safeTotalPages = Math.max(1, Number(totalPages || Math.ceil(safeTotal / safePageSize) || 1));
+  const safePage = Math.min(Math.max(1, Number(page || 1)), safeTotalPages);
+  const start = safeTotal ? ((safePage - 1) * safePageSize) + 1 : 0;
+  const end = Math.min(safeTotal, safePage * safePageSize);
+  const canPrev = safePage > 1;
+  const canNext = safePage < safeTotalPages;
+
+  const navButtonStyle = (disabled = false) => ({
+    border: 'none',
+    background: 'transparent',
+    color: disabled ? '#cbd5e1' : '#64748b',
+    cursor: disabled ? 'not-allowed' : 'pointer',
+    fontWeight: 900,
+    fontSize: '0.82rem',
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: '0.25rem',
+    padding: '0.35rem 0.25rem',
+  });
+
+  return (
+    <div style={{ display: 'grid', gridTemplateColumns: '1fr auto 1fr', alignItems: 'center', gap: '1rem', padding: '0.9rem 0', color: '#64748b', fontSize: '0.82rem', fontWeight: 900 }}>
+      <div>
+        Menampilkan {start}-{end} dari {safeTotal}
+      </div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', justifyContent: 'center' }}>
+        <button
+          type="button"
+          onClick={() => canPrev && onPageChange(safePage - 1)}
+          disabled={!canPrev}
+          style={navButtonStyle(!canPrev)}
+        >
+          <span style={{ fontSize: '1.05rem', lineHeight: 1 }}>&lt;</span> Prev
+        </button>
+        {getPaginationItems(safePage, safeTotalPages).map((item, index) => {
+          const isEllipsis = String(item).startsWith('ellipsis');
+          const isActive = item === safePage;
+          if (isEllipsis) {
+            return (
+              <span key={`${item}-${index}`} style={{ width: '24px', height: '24px', borderRadius: '999px', background: '#f1f5f9', color: '#94a3b8', display: 'inline-grid', placeItems: 'center', fontWeight: 900 }}>
+                ...
+              </span>
+            );
+          }
+          return (
+            <button
+              key={item}
+              type="button"
+              onClick={() => onPageChange(item)}
+              style={{
+                width: '24px',
+                height: '24px',
+                borderRadius: '999px',
+                border: 'none',
+                background: isActive ? '#f97316' : '#f1f5f9',
+                color: isActive ? 'white' : '#64748b',
+                cursor: 'pointer',
+                fontWeight: 900,
+                fontSize: '0.78rem',
+                display: 'inline-grid',
+                placeItems: 'center',
+              }}
+            >
+              {item}
+            </button>
+          );
+        })}
+        <button
+          type="button"
+          onClick={() => canNext && onPageChange(safePage + 1)}
+          disabled={!canNext}
+          style={navButtonStyle(!canNext)}
+        >
+          Next <span style={{ fontSize: '1.05rem', lineHeight: 1 }}>&gt;</span>
+        </button>
+      </div>
+      <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+        <select
+          value={safePageSize}
+          onChange={(event) => onPageSizeChange(Number(event.target.value))}
+          style={{ padding: '0.45rem 0.7rem', minWidth: '62px', borderRadius: '8px', border: '1px solid #e2e8f0', background: 'white', color: '#64748b', fontWeight: 900, outline: 'none' }}
+        >
+          {[10, 25, 50, 100].map(size => <option key={size} value={size}>{size}</option>)}
+        </select>
+      </div>
+    </div>
+  );
+}
+
 function KioskSettingsTab() {
   const [settings, setSettings] = useState(getKioskSettings());
   const [savedMessage, setSavedMessage] = useState('');
+  const [cameraDevices, setCameraDevices] = useState([]);
+  const [cameraMessage, setCameraMessage] = useState('');
+  const [isLoadingCameras, setIsLoadingCameras] = useState(false);
+  const [isTestingCamera, setIsTestingCamera] = useState(false);
+  const [isTestPrintActive, setIsTestPrintActive] = useState(false);
+  const previewVideoRef = useRef(null);
+  const previewStreamRef = useRef(null);
+
+  useEffect(() => () => stopStream(previewStreamRef.current), []);
+
+  useEffect(() => {
+    const handleAfterPrint = () => setIsTestPrintActive(false);
+    window.addEventListener('afterprint', handleAfterPrint);
+    return () => window.removeEventListener('afterprint', handleAfterPrint);
+  }, []);
 
   const handleChange = (e) => {
     const { name, value, type, checked } = e.target;
     setSettings(prev => ({ ...prev, [name]: type === 'checkbox' ? checked : value }));
+  };
+
+  const loadCameraDevices = async ({ requestPermission = false } = {}) => {
+    setIsLoadingCameras(true);
+    setCameraMessage('');
+    try {
+      let permissionStream = null;
+      if (requestPermission) {
+        permissionStream = await getCameraStream({
+          facingMode: settings.defaultCamera || 'user',
+          deviceId: settings.cameraDeviceId,
+        });
+      }
+      const devices = await listVideoDevices();
+      stopStream(permissionStream);
+      setCameraDevices(devices);
+      if (!devices.length) {
+        setCameraMessage('Tidak ada kamera yang terdeteksi.');
+      } else {
+        setCameraMessage(`${devices.length} kamera terdeteksi.`);
+      }
+    } catch (err) {
+      setCameraMessage(err.message || 'Gagal membaca daftar kamera.');
+    } finally {
+      setIsLoadingCameras(false);
+    }
+  };
+
+  useEffect(() => {
+    loadCameraDevices();
+  }, []);
+
+  const handleCameraDeviceChange = (e) => {
+    const deviceId = e.target.value;
+    const selectedDevice = cameraDevices.find(device => device.deviceId === deviceId);
+    setSettings(prev => ({
+      ...prev,
+      cameraDeviceId: deviceId,
+      cameraDeviceLabel: selectedDevice?.label || '',
+    }));
+  };
+
+  const handleTestCamera = async () => {
+    setIsTestingCamera(true);
+    setCameraMessage('');
+    stopStream(previewStreamRef.current);
+    try {
+      const stream = await getCameraStream({
+        facingMode: settings.defaultCamera || 'user',
+        deviceId: settings.cameraDeviceId,
+      });
+      previewStreamRef.current = stream;
+      if (previewVideoRef.current) {
+        previewVideoRef.current.srcObject = stream;
+        await previewVideoRef.current.play();
+      }
+      const devices = await listVideoDevices();
+      setCameraDevices(devices);
+      const activeTrack = stream.getVideoTracks?.()[0];
+      setSettings(prev => ({
+        ...prev,
+        cameraDeviceLabel: activeTrack?.label || prev.cameraDeviceLabel,
+      }));
+      setCameraMessage('Preview kamera aktif.');
+    } catch (err) {
+      setCameraMessage(err.message || 'Kamera tidak bisa ditest.');
+    } finally {
+      setIsTestingCamera(false);
+    }
+  };
+
+  const handleStopPreview = () => {
+    stopStream(previewStreamRef.current);
+    previewStreamRef.current = null;
+    if (previewVideoRef.current) {
+      previewVideoRef.current.srcObject = null;
+    }
+    setCameraMessage('Preview kamera dihentikan.');
+  };
+
+  const handleTestPrint = () => {
+    setIsTestPrintActive(true);
+    window.setTimeout(() => {
+      try {
+        window.print();
+      } catch (err) {
+        reportMonitoringError({
+          category: 'print',
+          message: err.message || 'Gagal test print dari admin.',
+          source: 'admin',
+          metadata: {
+            trigger: 'admin_test_print',
+            printerName: settings.printerName || '',
+          },
+        });
+      }
+    }, 100);
+  };
+
+  const handleUseCurrentFrontendUrl = () => {
+    const currentUrl = window.location.origin.replace(/\/$/, '');
+    setSettings(prev => ({
+      ...prev,
+      publicFrontendUrl: currentUrl,
+      publicGalleryBaseUrl: currentUrl,
+    }));
+    setSavedMessage('URL frontend saat ini dipakai untuk QR/gallery. Jangan lupa simpan.');
+    setTimeout(() => setSavedMessage(''), 3000);
+  };
+
+  const handleUseDefaultBackendUrl = () => {
+    setSettings(prev => ({ ...prev, backendApiUrl: BACKEND_API_URL }));
+    setSavedMessage('Backend API dikembalikan ke default. Jangan lupa simpan.');
+    setTimeout(() => setSavedMessage(''), 3000);
+  };
+
+  const handleCopyText = async (text) => {
+    if (!text) return;
+    try {
+      await navigator.clipboard.writeText(text);
+      setSavedMessage('URL berhasil disalin.');
+      setTimeout(() => setSavedMessage(''), 2500);
+    } catch {
+      setSavedMessage('Browser tidak mengizinkan copy otomatis.');
+      setTimeout(() => setSavedMessage(''), 2500);
+    }
   };
 
   const handleSave = (e) => {
@@ -163,35 +551,374 @@ function KioskSettingsTab() {
           <h2 style={{ margin: 0, color: '#111' }}>Kiosk Machine Settings</h2>
           <p style={{ margin: 0, color: '#6c757d', marginTop: '0.2rem', fontSize: '0.9rem' }}>Konfigurasi mesin fisik photobooth ini.</p>
         </div>
-        <button onClick={toggleFullscreen} style={{ padding: '0.6rem 1.2rem', background: '#111', color: 'white', border: 'none', borderRadius: '8px', cursor: 'pointer', fontWeight: 'bold', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+        <button onClick={toggleFullscreen} style={{ padding: '0.6rem 1.2rem', background: '#f97316', color: 'white', border: 'none', borderRadius: '8px', cursor: 'pointer', fontWeight: 'bold', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
           <OverviewIcon /> Masuk Fullscreen
         </button>
       </div>
 
-      <form onSubmit={handleSave} style={{ maxWidth: '600px' }}>
-        <div style={{ marginBottom: '1.5rem' }}>
-          <label style={{ display: 'block', marginBottom: '0.5rem', fontWeight: 'bold', color: '#495057' }}>Nama Kiosk / Cabang</label>
-          <input 
-            type="text" 
-            name="kioskName" 
-            value={settings.kioskName} 
-            onChange={handleChange}
-            style={{ width: '100%', padding: '0.8rem', borderRadius: '8px', border: '1px solid #ced4da', fontSize: '1rem' }}
-          />
-          <p style={{ fontSize: '0.8rem', color: '#868e96', marginTop: '0.3rem' }}>Nama ini bisa muncul di struk atau log transaksi.</p>
+      <form onSubmit={handleSave} style={{ maxWidth: '920px' }}>
+        {isTestPrintActive && (
+          <div className="print-area">
+            <div style={{
+              width: '4in',
+              height: '6in',
+              boxSizing: 'border-box',
+              border: '10px solid #f97316',
+              borderRadius: '18px',
+              display: 'flex',
+              flexDirection: 'column',
+              alignItems: 'center',
+              justifyContent: 'center',
+              gap: '0.25in',
+              fontFamily: 'Arial, sans-serif',
+              color: '#111827',
+              background: '#fff7ed',
+            }}>
+              <div style={{ width: '0.65in', height: '0.65in', borderRadius: '999px', background: '#f97316', color: 'white', display: 'grid', placeItems: 'center', fontWeight: 900, fontSize: '0.22in' }}>up</div>
+              <div style={{ fontSize: '0.26in', fontWeight: 900 }}>Urbanmenphoto</div>
+              <div style={{ width: '2.7in', height: '2.7in', border: '3px dashed #fdba74', borderRadius: '14px', display: 'grid', placeItems: 'center', textAlign: 'center', color: '#9a3412', fontWeight: 900, fontSize: '0.18in' }}>
+                TEST PRINT
+              </div>
+              <div style={{ fontSize: '0.13in', color: '#64748b', textAlign: 'center', lineHeight: 1.4 }}>
+                {settings.kioskName}<br />
+                {new Date().toLocaleString('id-ID')}
+              </div>
+            </div>
+          </div>
+        )}
+
+        <div style={{ marginBottom: '1.5rem', padding: '1.25rem', borderRadius: '12px', border: '1px solid #e5e7eb', background: '#fff' }}>
+          <div style={{ marginBottom: '1rem' }}>
+            <h3 style={{ margin: 0, color: '#111827' }}>Booth Profile</h3>
+            <p style={{ margin: '0.25rem 0 0', color: '#6b7280', fontSize: '0.85rem' }}>Identitas booth untuk log, gallery, dan operasional event.</p>
+          </div>
+
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
+            <div>
+              <label style={{ display: 'block', marginBottom: '0.45rem', fontWeight: 'bold', color: '#495057', fontSize: '0.9rem' }}>Booth ID</label>
+              <input
+                type="text"
+                name="boothId"
+                value={settings.boothId || ''}
+                readOnly
+                style={{ width: '100%', padding: '0.8rem', borderRadius: '8px', border: '1px solid #ced4da', fontSize: '0.95rem', background: '#f8fafc', color: '#64748b' }}
+              />
+              <p style={{ fontSize: '0.78rem', color: '#868e96', marginTop: '0.35rem' }}>ID unik browser/mesin ini untuk membedakan booth.</p>
+            </div>
+
+            <div>
+              <label style={{ display: 'block', marginBottom: '0.45rem', fontWeight: 'bold', color: '#495057', fontSize: '0.9rem' }}>Nama Kiosk / Cabang</label>
+              <input
+                type="text"
+                name="kioskName"
+                value={settings.kioskName || ''}
+                onChange={handleChange}
+                placeholder="Urbanmenphoto Booth"
+                style={{ width: '100%', padding: '0.8rem', borderRadius: '8px', border: '1px solid #ced4da', fontSize: '1rem' }}
+              />
+            </div>
+
+            <div>
+              <label style={{ display: 'block', marginBottom: '0.45rem', fontWeight: 'bold', color: '#495057', fontSize: '0.9rem' }}>Nama Event</label>
+              <input
+                type="text"
+                name="eventName"
+                value={settings.eventName || ''}
+                onChange={handleChange}
+                placeholder="Contoh: Wedding Andi & Sinta"
+                style={{ width: '100%', padding: '0.8rem', borderRadius: '8px', border: '1px solid #ced4da', fontSize: '1rem' }}
+              />
+            </div>
+
+            <div>
+              <label style={{ display: 'block', marginBottom: '0.45rem', fontWeight: 'bold', color: '#495057', fontSize: '0.9rem' }}>Lokasi Booth</label>
+              <input
+                type="text"
+                name="boothLocation"
+                value={settings.boothLocation || ''}
+                onChange={handleChange}
+                placeholder="Contoh: Lobby Utama / Ballroom A"
+                style={{ width: '100%', padding: '0.8rem', borderRadius: '8px', border: '1px solid #ced4da', fontSize: '1rem' }}
+              />
+            </div>
+
+            <div style={{ gridColumn: '1 / -1' }}>
+              <label style={{ display: 'block', marginBottom: '0.45rem', fontWeight: 'bold', color: '#495057', fontSize: '0.9rem' }}>Operator</label>
+              <input
+                type="text"
+                name="operatorName"
+                value={settings.operatorName || ''}
+                onChange={handleChange}
+                placeholder="Nama operator yang jaga booth"
+                style={{ width: '100%', padding: '0.8rem', borderRadius: '8px', border: '1px solid #ced4da', fontSize: '1rem' }}
+              />
+            </div>
+          </div>
         </div>
 
-        <div style={{ marginBottom: '1.5rem' }}>
-          <label style={{ display: 'block', marginBottom: '0.5rem', fontWeight: 'bold', color: '#495057' }}>Kamera Utama (Default)</label>
-          <select 
-            name="defaultCamera" 
-            value={settings.defaultCamera} 
+        <div style={{ marginBottom: '1.5rem', padding: '1.25rem', borderRadius: '12px', border: '1px solid #e5e7eb', background: '#f8fafc' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', gap: '1rem', alignItems: 'flex-start', marginBottom: '1rem' }}>
+            <div>
+              <h3 style={{ margin: 0, color: '#111827' }}>Network Settings</h3>
+              <p style={{ margin: '0.25rem 0 0', color: '#6b7280', fontSize: '0.85rem' }}>Atur alamat yang dipakai QR customer, gallery, dan koneksi backend.</p>
+            </div>
+            <button
+              type="button"
+              onClick={handleUseCurrentFrontendUrl}
+              style={{ padding: '0.65rem 1rem', background: '#111827', color: 'white', border: 'none', borderRadius: '8px', cursor: 'pointer', fontWeight: 'bold', whiteSpace: 'nowrap' }}
+            >
+              Pakai URL Sekarang
+            </button>
+          </div>
+
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
+            <div>
+              <label style={{ display: 'block', marginBottom: '0.45rem', fontWeight: 'bold', color: '#495057', fontSize: '0.9rem' }}>Public Frontend URL</label>
+              <input
+                type="url"
+                name="publicFrontendUrl"
+                value={settings.publicFrontendUrl || ''}
+                onChange={handleChange}
+                placeholder="http://192.168.1.10:5173"
+                style={{ width: '100%', padding: '0.8rem', borderRadius: '8px', border: '1px solid #ced4da', fontSize: '1rem' }}
+              />
+            </div>
+
+            <div>
+              <label style={{ display: 'block', marginBottom: '0.45rem', fontWeight: 'bold', color: '#495057', fontSize: '0.9rem' }}>Public Gallery / QR URL</label>
+              <input
+                type="url"
+                name="publicGalleryBaseUrl"
+                value={settings.publicGalleryBaseUrl || ''}
+                onChange={handleChange}
+                placeholder="http://192.168.1.10:5173"
+                style={{ width: '100%', padding: '0.8rem', borderRadius: '8px', border: '1px solid #ced4da', fontSize: '1rem' }}
+              />
+              <p style={{ fontSize: '0.78rem', color: '#868e96', marginTop: '0.35rem' }}>QR akan menjadi URL ini + /gallery/id.</p>
+            </div>
+
+            <div style={{ gridColumn: '1 / -1' }}>
+              <label style={{ display: 'block', marginBottom: '0.45rem', fontWeight: 'bold', color: '#495057', fontSize: '0.9rem' }}>Backend API URL</label>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: '0.75rem' }}>
+                <input
+                  type="url"
+                  name="backendApiUrl"
+                  value={settings.backendApiUrl || ''}
+                  onChange={handleChange}
+                  placeholder={BACKEND_API_URL}
+                  style={{ width: '100%', padding: '0.8rem', borderRadius: '8px', border: '1px solid #ced4da', fontSize: '1rem' }}
+                />
+                <button
+                  type="button"
+                  onClick={handleUseDefaultBackendUrl}
+                  style={{ padding: '0.65rem 1rem', background: 'white', color: '#111827', border: '1px solid #d1d5db', borderRadius: '8px', cursor: 'pointer', fontWeight: 'bold', whiteSpace: 'nowrap' }}
+                >
+                  Default
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem', marginTop: '1rem' }}>
+            <button
+              type="button"
+              onClick={() => handleCopyText(window.location.origin)}
+              style={{ padding: '0.75rem', background: 'white', color: '#374151', border: '1px solid #e5e7eb', borderRadius: '8px', cursor: 'pointer', fontWeight: 'bold', textAlign: 'left', overflowWrap: 'anywhere' }}
+            >
+              Browser sekarang: {window.location.origin}
+            </button>
+            <button
+              type="button"
+              onClick={() => handleCopyText(getBackendApiUrl())}
+              style={{ padding: '0.75rem', background: 'white', color: '#374151', border: '1px solid #e5e7eb', borderRadius: '8px', cursor: 'pointer', fontWeight: 'bold', textAlign: 'left', overflowWrap: 'anywhere' }}
+            >
+              Backend aktif: {getBackendApiUrl()}
+            </button>
+          </div>
+
+          {/(localhost|127\.0\.0\.1)/.test(`${settings.publicFrontendUrl || window.location.origin} ${settings.publicGalleryBaseUrl || ''}`) && (
+            <div style={{ marginTop: '1rem', padding: '0.85rem 1rem', borderRadius: '10px', border: '1px solid #fed7aa', background: '#fff7ed', color: '#9a3412', fontWeight: 800, fontSize: '0.86rem' }}>
+              Untuk test dari HP, ganti localhost menjadi IP komputer booth, contoh http://192.168.x.x:5173.
+            </div>
+          )}
+        </div>
+
+        <div style={{ marginBottom: '1.5rem', padding: '1.25rem', borderRadius: '12px', border: '1px solid #e5e7eb', background: '#fff7ed' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', gap: '1rem', alignItems: 'flex-start', marginBottom: '1rem' }}>
+            <div>
+              <label style={{ display: 'block', marginBottom: '0.35rem', fontWeight: 'bold', color: '#495057' }}>Camera Device Booth</label>
+              <p style={{ fontSize: '0.82rem', color: '#868e96', margin: 0 }}>Dipilih admin/operator dan otomatis dipakai customer saat sesi foto.</p>
+            </div>
+            <button
+              type="button"
+              onClick={() => loadCameraDevices({ requestPermission: true })}
+              disabled={isLoadingCameras}
+              style={{ padding: '0.65rem 1rem', background: '#111827', color: 'white', border: 'none', borderRadius: '8px', cursor: isLoadingCameras ? 'wait' : 'pointer', fontWeight: 'bold', whiteSpace: 'nowrap' }}
+            >
+              {isLoadingCameras ? 'Membaca...' : 'Refresh Kamera'}
+            </button>
+          </div>
+
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem', marginBottom: '1rem' }}>
+            <div>
+              <label style={{ display: 'block', marginBottom: '0.45rem', fontWeight: 'bold', color: '#495057', fontSize: '0.9rem' }}>Kamera Terpilih</label>
+              <select
+                name="cameraDeviceId"
+                value={settings.cameraDeviceId || ''}
+                onChange={handleCameraDeviceChange}
+                style={{ width: '100%', padding: '0.8rem', borderRadius: '8px', border: '1px solid #ced4da', fontSize: '1rem', backgroundColor: 'white' }}
+              >
+                <option value="">Auto / Browser Default</option>
+                {cameraDevices.map((device, index) => (
+                  <option key={device.deviceId || index} value={device.deviceId}>
+                    {device.label || `Camera ${index + 1}`}
+                  </option>
+                ))}
+              </select>
+              <p style={{ fontSize: '0.78rem', color: '#868e96', marginTop: '0.35rem' }}>
+                {settings.cameraDeviceLabel ? `Tersimpan: ${settings.cameraDeviceLabel}` : 'Klik Refresh Kamera kalau label belum muncul.'}
+              </p>
+            </div>
+
+            <div>
+              <label style={{ display: 'block', marginBottom: '0.45rem', fontWeight: 'bold', color: '#495057', fontSize: '0.9rem' }}>Fallback Facing Mode</label>
+              <select
+                name="defaultCamera"
+                value={settings.defaultCamera}
+                onChange={handleChange}
+                style={{ width: '100%', padding: '0.8rem', borderRadius: '8px', border: '1px solid #ced4da', fontSize: '1rem', backgroundColor: 'white' }}
+              >
+                <option value="user">Kamera Depan / Webcam</option>
+                <option value="environment">Kamera Belakang / Capture Card</option>
+              </select>
+              <label style={{ display: 'flex', alignItems: 'center', gap: '0.55rem', marginTop: '0.75rem', color: '#495057', fontWeight: 'bold', fontSize: '0.88rem' }}>
+                <input
+                  type="checkbox"
+                  name="mirrorCamera"
+                  checked={Boolean(settings.mirrorCamera)}
+                  onChange={handleChange}
+                  style={{ width: 18, height: 18, accentColor: '#f97316' }}
+                />
+                Mirror preview & hasil foto
+              </label>
+            </div>
+          </div>
+
+          <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 180px', gap: '1rem', alignItems: 'stretch' }}>
+            <div style={{ background: '#111827', borderRadius: '12px', minHeight: '180px', overflow: 'hidden', display: 'grid', placeItems: 'center', border: '1px solid #1f2937' }}>
+              <video
+                ref={previewVideoRef}
+                muted
+                playsInline
+                className={settings.mirrorCamera ? 'is-mirrored' : ''}
+                style={{ width: '100%', height: '100%', minHeight: '180px', objectFit: 'cover', display: 'block' }}
+              />
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.65rem' }}>
+              <button
+                type="button"
+                onClick={handleTestCamera}
+                disabled={isTestingCamera}
+                style={{ padding: '0.85rem 1rem', background: '#f97316', color: 'white', border: 'none', borderRadius: '8px', cursor: isTestingCamera ? 'wait' : 'pointer', fontWeight: 'bold' }}
+              >
+                {isTestingCamera ? 'Testing...' : 'Test Preview'}
+              </button>
+              <button
+                type="button"
+                onClick={handleStopPreview}
+                style={{ padding: '0.85rem 1rem', background: 'white', color: '#111827', border: '1px solid #d1d5db', borderRadius: '8px', cursor: 'pointer', fontWeight: 'bold' }}
+              >
+                Stop Preview
+              </button>
+              {cameraMessage && (
+                <div style={{ padding: '0.8rem', borderRadius: '8px', background: 'white', color: '#6b7280', fontSize: '0.82rem', lineHeight: 1.4 }}>
+                  {cameraMessage}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+
+        <div style={{ marginBottom: '1.5rem', padding: '1.25rem', borderRadius: '12px', border: '1px solid #e5e7eb', background: '#f8fafc' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '1rem', marginBottom: '1rem' }}>
+            <div>
+              <label style={{ display: 'block', marginBottom: '0.35rem', fontWeight: 'bold', color: '#495057' }}>Printer Booth</label>
+              <p style={{ fontSize: '0.82rem', color: '#868e96', margin: 0 }}>Browser memakai printer default OS. Untuk print tanpa dialog, jalankan Chrome dengan kiosk printing.</p>
+            </div>
+            <button
+              type="button"
+              onClick={handleTestPrint}
+              style={{ padding: '0.65rem 1rem', background: '#111827', color: 'white', border: 'none', borderRadius: '8px', cursor: 'pointer', fontWeight: 'bold', whiteSpace: 'nowrap' }}
+            >
+              Test Print
+            </button>
+          </div>
+
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem', marginBottom: '1rem' }}>
+            <div>
+              <label style={{ display: 'block', marginBottom: '0.45rem', fontWeight: 'bold', color: '#495057', fontSize: '0.9rem' }}>Mode Print</label>
+              <select
+                name="printMode"
+                value={settings.printMode || 'dialog'}
+                onChange={handleChange}
+                style={{ width: '100%', padding: '0.8rem', borderRadius: '8px', border: '1px solid #ced4da', fontSize: '1rem', backgroundColor: 'white' }}
+              >
+                <option value="dialog">Browser Dialog</option>
+                <option value="kiosk">Silent Kiosk Printing</option>
+              </select>
+              <p style={{ fontSize: '0.78rem', color: '#868e96', marginTop: '0.35rem' }}>
+                Silent kiosk butuh Chrome dijalankan dengan flag <code>--kiosk-printing</code>.
+              </p>
+            </div>
+
+            <div>
+              <label style={{ display: 'block', marginBottom: '0.45rem', fontWeight: 'bold', color: '#495057', fontSize: '0.9rem' }}>Nama Printer / Catatan</label>
+              <input
+                type="text"
+                name="printerName"
+                value={settings.printerName || ''}
+                onChange={handleChange}
+                placeholder="Contoh: Canon Selphy / DNP RX1"
+                style={{ width: '100%', padding: '0.8rem', borderRadius: '8px', border: '1px solid #ced4da', fontSize: '1rem' }}
+              />
+              <p style={{ fontSize: '0.78rem', color: '#868e96', marginTop: '0.35rem' }}>Sebagai label operator. Pemilihan printer fisik tetap dari OS/browser.</p>
+            </div>
+          </div>
+
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
+            <label style={{ display: 'flex', alignItems: 'center', gap: '0.65rem', padding: '0.9rem 1rem', borderRadius: '10px', border: '1px solid #e5e7eb', background: 'white', color: '#495057', fontWeight: 'bold' }}>
+              <input
+                type="checkbox"
+                name="autoPrintEnabled"
+                checked={Boolean(settings.autoPrintEnabled)}
+                onChange={handleChange}
+                style={{ width: 18, height: 18, accentColor: '#f97316' }}
+              />
+              Auto print setelah foto selesai
+            </label>
+
+            <div>
+              <label style={{ display: 'block', marginBottom: '0.45rem', fontWeight: 'bold', color: '#495057', fontSize: '0.9rem' }}>Delay Auto Print (detik)</label>
+              <input
+                type="number"
+                name="printDelaySeconds"
+                value={settings.printDelaySeconds ?? 1.5}
+                onChange={handleChange}
+                min="0"
+                max="10"
+                step="0.5"
+                style={{ width: '100%', padding: '0.8rem', borderRadius: '8px', border: '1px solid #ced4da', fontSize: '1rem' }}
+              />
+            </div>
+          </div>
+
+          <textarea
+            name="printNote"
+            value={settings.printNote || ''}
             onChange={handleChange}
-            style={{ width: '100%', padding: '0.8rem', borderRadius: '8px', border: '1px solid #ced4da', fontSize: '1rem', backgroundColor: 'white' }}
-          >
-            <option value="user">Kamera Depan (Webcam Standard)</option>
-            <option value="environment">Kamera Belakang (DSLR / Capture Card)</option>
-          </select>
+            placeholder="Catatan operator, contoh: set printer default ke 4R borderless sebelum event."
+            style={{ width: '100%', minHeight: '76px', marginTop: '1rem', padding: '0.8rem', borderRadius: '8px', border: '1px solid #ced4da', fontSize: '0.95rem', resize: 'vertical' }}
+          />
         </div>
 
         <div style={{ marginBottom: '2rem' }}>
@@ -208,12 +935,663 @@ function KioskSettingsTab() {
         </div>
 
         <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
-          <button type="submit" style={{ padding: '0.8rem 2rem', background: '#00e58c', color: '#111', border: 'none', borderRadius: '8px', cursor: 'pointer', fontWeight: 'bold', fontSize: '1rem' }}>
+          <button type="submit" style={{ padding: '0.8rem 2rem', background: '#f97316', color: 'white', border: 'none', borderRadius: '8px', cursor: 'pointer', fontWeight: 'bold', fontSize: '1rem' }}>
             Simpan Pengaturan
           </button>
           {savedMessage && <span style={{ color: '#10B981', fontWeight: 'bold' }}>✓ {savedMessage}</span>}
         </div>
       </form>
+    </div>
+  );
+}
+
+const HealthPill = ({ status }) => {
+  const styles = {
+    ok: { background: '#dcfce7', color: '#166534', border: '1px solid #bbf7d0', label: 'OK' },
+    warn: { background: '#fef3c7', color: '#92400e', border: '1px solid #fde68a', label: 'Warning' },
+    fail: { background: '#fee2e2', color: '#991b1b', border: '1px solid #fecaca', label: 'Failed' },
+    checking: { background: '#e0f2fe', color: '#075985', border: '1px solid #bae6fd', label: 'Checking' },
+    idle: { background: '#f3f4f6', color: '#374151', border: '1px solid #e5e7eb', label: 'Idle' },
+  };
+  const style = styles[status] || styles.idle;
+  return (
+    <span style={{ padding: '0.28rem 0.7rem', borderRadius: '999px', fontWeight: 900, fontSize: '0.78rem', whiteSpace: 'nowrap', ...style }}>
+      {style.label}
+    </span>
+  );
+};
+
+const createHealthItem = (id, label, status, detail, meta = '') => ({ id, label, status, detail, meta });
+
+function BoothHealthTab({ adminToken }) {
+  const [items, setItems] = useState([]);
+  const [checking, setChecking] = useState(false);
+  const [lastCheckedAt, setLastCheckedAt] = useState('');
+
+  const runChecks = async () => {
+    setChecking(true);
+    const nextItems = [];
+    const settings = getKioskSettings();
+    const activeBackendUrl = getBackendApiUrl();
+    const activeFrontendUrl = (settings.publicFrontendUrl || window.location.origin).replace(/\/$/, '');
+    const activeGalleryUrl = getPublicGalleryBaseUrl(settings);
+
+    try {
+      const startedAt = performance.now();
+      const health = await backendRequest('/health');
+      const durationMs = Math.round(performance.now() - startedAt);
+      nextItems.push(createHealthItem(
+        'backend',
+        'Backend API',
+        health?.ok ? 'ok' : 'warn',
+        health?.ok ? `Backend online (${durationMs} ms).` : 'Backend merespons, tapi status health tidak OK.',
+        activeBackendUrl,
+      ));
+    } catch (err) {
+      nextItems.push(createHealthItem('backend', 'Backend API', 'fail', err.message || 'Backend tidak bisa diakses.', activeBackendUrl));
+    }
+
+    try {
+      const me = await backendRequest('/api/admin/auth/me', adminToken);
+      nextItems.push(createHealthItem('admin', 'Admin Session', 'ok', `Login aktif sebagai ${me?.email || 'admin'}.`, me?.role ? `Role: ${me.role}` : ''));
+    } catch (err) {
+      nextItems.push(createHealthItem('admin', 'Admin Session', 'fail', err.message || 'Token admin tidak valid.'));
+    }
+
+    try {
+      const devices = await listVideoDevices();
+      const selectedDevice = settings.cameraDeviceId
+        ? devices.find(device => device.deviceId === settings.cameraDeviceId)
+        : null;
+      const status = devices.length === 0 ? 'fail' : (settings.cameraDeviceId && !selectedDevice ? 'warn' : 'ok');
+      const detail = devices.length === 0
+        ? 'Tidak ada kamera terdeteksi.'
+        : settings.cameraDeviceId
+          ? selectedDevice
+            ? `Kamera terpilih tersedia: ${selectedDevice.label || settings.cameraDeviceLabel || 'Camera device'}.`
+            : 'Kamera tersimpan tidak ditemukan. Sistem akan fallback ke browser default.'
+          : `${devices.length} kamera tersedia. Sistem memakai browser default.`;
+      nextItems.push(createHealthItem('camera', 'Camera Device', status, detail, settings.mirrorCamera ? 'Mirror ON' : 'Mirror OFF'));
+    } catch (err) {
+      nextItems.push(createHealthItem('camera', 'Camera Device', 'fail', err.message || 'Tidak bisa membaca daftar kamera.'));
+    }
+
+    const printStatus = settings.autoPrintEnabled
+      ? (settings.printMode === 'kiosk' ? 'ok' : 'warn')
+      : 'warn';
+    const printDetail = settings.autoPrintEnabled
+      ? settings.printMode === 'kiosk'
+        ? 'Auto print aktif. Pastikan Chrome dibuka dengan --kiosk-printing dan printer default OS sudah benar.'
+        : 'Auto print aktif, tetapi browser dialog tetap akan muncul.'
+      : 'Auto print mati. Operator perlu klik PRINT PHOTO manual.';
+    nextItems.push(createHealthItem('printer', 'Printer Flow', printStatus, printDetail, settings.printerName || 'Printer default OS/browser'));
+
+    try {
+      const key = `booth_health_probe_${Date.now()}`;
+      window.localStorage.setItem(key, 'ok');
+      window.localStorage.removeItem(key);
+      nextItems.push(createHealthItem('localStorage', 'Local Storage', 'ok', 'Setting booth bisa dibaca dan ditulis di browser ini.'));
+    } catch (err) {
+      nextItems.push(createHealthItem('localStorage', 'Local Storage', 'fail', 'Browser tidak bisa menulis localStorage. Setting booth tidak akan tersimpan.'));
+    }
+
+    try {
+      const galleryKeys = Object.keys(window.localStorage).filter(key => key.startsWith('potobox_gallery_'));
+      nextItems.push(createHealthItem(
+        'localGallery',
+        'Local Gallery Cache',
+        galleryKeys.length > 20 ? 'warn' : 'ok',
+        galleryKeys.length ? `${galleryKeys.length} cache gallery lokal tersimpan di browser.` : 'Tidak ada cache gallery lokal menumpuk.',
+      ));
+    } catch {
+      nextItems.push(createHealthItem('localGallery', 'Local Gallery Cache', 'warn', 'Tidak bisa membaca jumlah cache gallery lokal.'));
+    }
+
+    const frontendHost = (() => {
+      try {
+        return new URL(activeFrontendUrl).hostname;
+      } catch {
+        return window.location.hostname;
+      }
+    })();
+    const backendHost = (() => {
+      try {
+        return new URL(activeBackendUrl).hostname;
+      } catch {
+        return '';
+      }
+    })();
+    const galleryHost = (() => {
+      try {
+        return new URL(activeGalleryUrl).hostname;
+      } catch {
+        return '';
+      }
+    })();
+    const isFrontendLocal = ['localhost', '127.0.0.1', ''].includes(frontendHost);
+    const isBackendLocal = ['localhost', '127.0.0.1', ''].includes(backendHost);
+    const isGalleryLocal = ['localhost', '127.0.0.1', ''].includes(galleryHost);
+    nextItems.push(createHealthItem(
+      'network',
+      'Phone / QR Network',
+      isFrontendLocal || isBackendLocal || isGalleryLocal ? 'warn' : 'ok',
+      isFrontendLocal || isBackendLocal || isGalleryLocal
+        ? 'Masih memakai localhost/127.0.0.1. HP customer di WiFi lain tidak bisa membuka QR ini.'
+        : 'Frontend/backend memakai alamat jaringan, lebih siap untuk QR dibuka dari HP.',
+      `Frontend: ${activeFrontendUrl} | Gallery: ${activeGalleryUrl} | Backend: ${activeBackendUrl}`,
+    ));
+
+    setItems(nextItems);
+    setLastCheckedAt(new Date().toLocaleString('id-ID'));
+    setChecking(false);
+  };
+
+  useEffect(() => {
+    runChecks();
+  }, []);
+
+  const totals = items.reduce((acc, item) => {
+    acc[item.status] = (acc[item.status] || 0) + 1;
+    return acc;
+  }, {});
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
+      <div style={{ background: 'white', padding: '2rem', borderRadius: '12px', border: '1px solid #e9ecef', boxShadow: '0 2px 8px rgba(0,0,0,0.02)' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', gap: '1rem', alignItems: 'flex-start', marginBottom: '1.5rem' }}>
+          <div>
+            <h2 style={{ margin: 0, color: '#111' }}>Booth Health Check</h2>
+            <p style={{ margin: '0.25rem 0 0', color: '#6c757d', fontSize: '0.9rem' }}>Cek kesiapan backend, kamera, printer, storage, dan QR network sebelum booth dipakai.</p>
+            {lastCheckedAt && <p style={{ margin: '0.45rem 0 0', color: '#9ca3af', fontSize: '0.82rem' }}>Terakhir dicek: {lastCheckedAt}</p>}
+          </div>
+          <button
+            type="button"
+            onClick={runChecks}
+            disabled={checking}
+            style={{ padding: '0.75rem 1.1rem', background: '#f97316', color: 'white', border: 'none', borderRadius: '8px', cursor: checking ? 'wait' : 'pointer', fontWeight: 'bold' }}
+          >
+            {checking ? 'Checking...' : 'Run Check'}
+          </button>
+        </div>
+
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: '0.9rem', marginBottom: '1.25rem' }}>
+          <div style={{ padding: '1rem', borderRadius: '10px', background: '#f0fdf4', border: '1px solid #bbf7d0' }}>
+            <div style={{ color: '#166534', fontSize: '0.8rem', fontWeight: 900 }}>OK</div>
+            <div style={{ fontSize: '1.8rem', fontWeight: 900 }}>{totals.ok || 0}</div>
+          </div>
+          <div style={{ padding: '1rem', borderRadius: '10px', background: '#fffbeb', border: '1px solid #fde68a' }}>
+            <div style={{ color: '#92400e', fontSize: '0.8rem', fontWeight: 900 }}>Warning</div>
+            <div style={{ fontSize: '1.8rem', fontWeight: 900 }}>{totals.warn || 0}</div>
+          </div>
+          <div style={{ padding: '1rem', borderRadius: '10px', background: '#fef2f2', border: '1px solid #fecaca' }}>
+            <div style={{ color: '#991b1b', fontSize: '0.8rem', fontWeight: 900 }}>Failed</div>
+            <div style={{ fontSize: '1.8rem', fontWeight: 900 }}>{totals.fail || 0}</div>
+          </div>
+        </div>
+
+        <div style={{ display: 'grid', gap: '0.85rem' }}>
+          {items.map(item => (
+            <div key={item.id} style={{ display: 'grid', gridTemplateColumns: '180px 110px minmax(0, 1fr)', gap: '1rem', alignItems: 'center', padding: '1rem', borderRadius: '10px', border: '1px solid #e5e7eb', background: '#fff' }}>
+              <div style={{ fontWeight: 900, color: '#111827' }}>{item.label}</div>
+              <HealthPill status={item.status} />
+              <div>
+                <div style={{ color: '#374151', fontWeight: 700 }}>{item.detail}</div>
+                {item.meta && <div style={{ color: '#9ca3af', fontSize: '0.8rem', marginTop: '0.25rem', overflowWrap: 'anywhere' }}>{item.meta}</div>}
+              </div>
+            </div>
+          ))}
+          {!items.length && (
+            <div style={{ padding: '2rem', textAlign: 'center', color: '#6b7280', border: '1px dashed #d1d5db', borderRadius: '10px' }}>
+              Klik Run Check untuk mulai cek booth.
+            </div>
+          )}
+        </div>
+      </div>
+
+     
+    </div>
+  );
+}
+
+function RecoveryTab() {
+  const getRecoveryKey = (session = {}) => session?.backendSessionId || session?.localGalleryId || session?.id || '';
+  const [history, setHistory] = useState(() => getRecoveryHistory());
+  const [recovery, setRecovery] = useState(() => getRecoverySession() || getRecoveryHistory()[0] || null);
+  const [message, setMessage] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [isPrintActive, setIsPrintActive] = useState(false);
+
+  useEffect(() => {
+    const handleAfterPrint = () => setIsPrintActive(false);
+    window.addEventListener('afterprint', handleAfterPrint);
+    return () => window.removeEventListener('afterprint', handleAfterPrint);
+  }, []);
+
+  const refresh = () => {
+    const nextHistory = getRecoveryHistory();
+    const currentKey = getRecoveryKey(recovery);
+    setHistory(nextHistory);
+    setRecovery(nextHistory.find(item => getRecoveryKey(item) === currentKey) || getRecoverySession() || nextHistory[0] || null);
+    setMessage('');
+  };
+
+  const selectRecovery = (session) => {
+    setRecovery(session);
+    setMessage('');
+  };
+
+  const handleRetrySave = async () => {
+    if (!recovery?.backendSessionId || !recovery?.customerToken || !recovery?.finalizePayload) {
+      setMessage('Payload backend/session token tidak tersedia. Hanya bisa print ulang atau buka gallery lokal.');
+      return;
+    }
+    setSaving(true);
+    setMessage('Menyimpan ulang ke backend...');
+    try {
+      const finalized = await backendRequest(`/api/sessions/${recovery.backendSessionId}/finalize`, null, {
+        method: 'POST',
+        sessionToken: recovery.customerToken,
+        body: JSON.stringify(recovery.finalizePayload),
+      });
+      const downloadUrl = `${getPublicGalleryBaseUrl()}/gallery/${recovery.backendSessionId}`;
+      const next = {
+        ...recovery,
+        status: 'saved',
+        error: '',
+        downloadUrl,
+        backendDownloadUrl: finalized?.downloadUrl || recovery.backendDownloadUrl || '',
+        finalizedAt: new Date().toISOString(),
+      };
+      saveRecoverySession(next);
+      setRecovery(next);
+      setHistory(getRecoveryHistory());
+      setMessage('Sesi berhasil disimpan ulang ke backend.');
+    } catch (err) {
+      const next = {
+        ...recovery,
+        status: 'failed',
+        error: err.message || 'Retry save gagal.',
+      };
+      saveRecoverySession(next);
+      setRecovery(next);
+      setHistory(getRecoveryHistory());
+      setMessage(next.error);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handlePrintAgain = () => {
+    if (!recovery?.printImage) {
+      setMessage('Tidak ada file print tersimpan untuk sesi terakhir.');
+      return;
+    }
+    setIsPrintActive(true);
+    window.setTimeout(() => {
+      try {
+        window.print();
+      } catch (err) {
+        reportMonitoringError({
+          category: 'print',
+          sessionId: recovery?.backendSessionId || recovery?.id || '',
+          message: err.message || 'Gagal print ulang dari recovery.',
+          source: 'admin',
+          metadata: {
+            trigger: 'recovery_print_again',
+          },
+        });
+      }
+    }, 100);
+  };
+
+  const handleRemoveSelected = () => {
+    const sessionKey = getRecoveryKey(recovery);
+    if (!sessionKey) return;
+    removeRecoverySession(sessionKey);
+    const nextHistory = getRecoveryHistory();
+    setHistory(nextHistory);
+    setRecovery(nextHistory[0] || null);
+    setMessage('Sesi recovery terpilih dibersihkan.');
+  };
+
+  const handleClearAll = () => {
+    clearRecoveryHistory();
+    setHistory([]);
+    setRecovery(null);
+    setMessage('Semua recovery history dibersihkan.');
+  };
+
+  const status = recovery?.status || 'idle';
+  const hasBackendRetry = Boolean(recovery?.backendSessionId && recovery?.customerToken && recovery?.finalizePayload);
+  const selectedKey = getRecoveryKey(recovery);
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
+      {isPrintActive && recovery?.printImage && (
+        <div className="print-area">
+          {recovery.printMeta && (
+            <style>{`
+              @page {
+                size: ${recovery.printMeta.inchWidth}in ${recovery.printMeta.inchHeight}in;
+                margin: 0;
+              }
+            `}</style>
+          )}
+          <img
+            src={recovery.printImage}
+            alt="Recovery print"
+            className="print-output-image"
+            style={{
+              width: recovery.printMeta ? `${recovery.printMeta.inchWidth}in` : '4in',
+              height: recovery.printMeta ? `${recovery.printMeta.inchHeight}in` : '6in',
+            }}
+          />
+        </div>
+      )}
+
+      <div style={{ background: 'white', padding: '2rem', borderRadius: '12px', border: '1px solid #e9ecef', boxShadow: '0 2px 8px rgba(0,0,0,0.02)' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', gap: '1rem', alignItems: 'flex-start', marginBottom: '1.5rem' }}>
+          <div>
+            <h2 style={{ margin: 0, color: '#111' }}>Session Recovery History</h2>
+            <p style={{ margin: '0.25rem 0 0', color: '#6c757d', fontSize: '0.9rem' }}>Pilih beberapa sesi terakhir untuk retry save/print tanpa customer foto ulang.</p>
+          </div>
+          <div style={{ display: 'flex', gap: '0.6rem', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+            <button onClick={refresh} style={{ padding: '0.65rem 1rem', borderRadius: '8px', border: '1px solid #e5e7eb', background: '#f8f9fa', color: '#111', cursor: 'pointer', fontWeight: 'bold' }}>
+              Refresh
+            </button>
+            <button onClick={handleClearAll} disabled={!history.length} style={{ padding: '0.65rem 1rem', borderRadius: '8px', border: '1px solid #fecaca', background: history.length ? '#fee2e2' : '#f1f5f9', color: history.length ? '#dc2626' : '#94a3b8', cursor: history.length ? 'pointer' : 'not-allowed', fontWeight: 'bold' }}>
+              Clear All
+            </button>
+          </div>
+        </div>
+
+        {message && (
+          <div style={{ marginBottom: '1rem', padding: '0.9rem 1rem', borderRadius: '10px', background: message.includes('berhasil') ? '#dcfce7' : '#fff7ed', color: message.includes('berhasil') ? '#166534' : '#9a3412', fontWeight: 800 }}>
+            {message}
+          </div>
+        )}
+
+        {!history.length && !recovery ? (
+          <div style={{ padding: '2rem', borderRadius: '12px', border: '1px dashed #d1d5db', color: '#6b7280', textAlign: 'center' }}>
+            Belum ada recovery history yang bisa dipakai di browser booth ini.
+          </div>
+        ) : (
+          <div style={{ display: 'grid', gridTemplateColumns: '320px minmax(0, 1fr)', gap: '1.5rem', alignItems: 'start' }}>
+            <div style={{ borderRadius: '14px', border: '1px solid #e5e7eb', background: '#f8fafc', overflow: 'hidden' }}>
+              <div style={{ padding: '0.9rem 1rem', borderBottom: '1px solid #e5e7eb', background: 'white' }}>
+                <div style={{ fontWeight: 900, color: '#111827' }}>Sesi Terakhir</div>
+                <div style={{ fontSize: '0.78rem', color: '#64748b', marginTop: '0.2rem' }}>{history.length} sesi tersimpan di browser booth ini</div>
+              </div>
+              <div style={{ display: 'grid', gap: '0.65rem', padding: '0.75rem', maxHeight: '620px', overflowY: 'auto' }}>
+                {history.map((session, index) => {
+                  const sessionKey = getRecoveryKey(session);
+                  const isSelected = sessionKey === selectedKey;
+                  return (
+                    <button
+                      key={sessionKey || index}
+                      type="button"
+                      onClick={() => selectRecovery(session)}
+                      style={{
+                        display: 'grid',
+                        gridTemplateColumns: '74px minmax(0, 1fr)',
+                        gap: '0.75rem',
+                        width: '100%',
+                        padding: '0.65rem',
+                        borderRadius: '12px',
+                        border: isSelected ? '2px solid #f97316' : '1px solid #e5e7eb',
+                        background: isSelected ? '#fff7ed' : 'white',
+                        cursor: 'pointer',
+                        textAlign: 'left',
+                      }}
+                    >
+                      <div style={{ width: 74, height: 74, borderRadius: '10px', overflow: 'hidden', background: '#e5e7eb', display: 'grid', placeItems: 'center' }}>
+                        {session.printImage || session.finalImage ? (
+                          <img src={session.printImage || session.finalImage} alt="Recovery thumbnail" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                        ) : (
+                          <span style={{ color: '#94a3b8', fontWeight: 900, fontSize: '0.75rem' }}>NO IMG</span>
+                        )}
+                      </div>
+                      <div style={{ minWidth: 0 }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', gap: '0.5rem', alignItems: 'center', marginBottom: '0.35rem' }}>
+                          <span style={{ fontWeight: 900, color: '#111827', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                            {session.backendSessionId ? `#${session.backendSessionId.slice(0, 8)}` : session.localGalleryId || 'Local session'}
+                          </span>
+                          <StatusBadge status={session.status || 'idle'} />
+                        </div>
+                        <div style={{ color: '#64748b', fontSize: '0.78rem', fontWeight: 700 }}>
+                          {formatDateTime(session.updatedAt || session.createdAt)}
+                        </div>
+                        <div style={{ color: session.error ? '#dc2626' : '#94a3b8', fontSize: '0.75rem', marginTop: '0.25rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                          {session.error || (session.downloadUrl ? 'Gallery link tersedia' : 'Menunggu hasil')}
+                        </div>
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div style={{ display: 'grid', gridTemplateColumns: '260px minmax(0, 1fr)', gap: '1.25rem', alignItems: 'start' }}>
+              <div style={{ borderRadius: '14px', border: '1px solid #e5e7eb', overflow: 'hidden', background: '#f8fafc' }}>
+                {recovery?.printImage ? (
+                  <img src={recovery.printImage} alt="Selected print preview" style={{ width: '100%', display: 'block', maxHeight: '420px', objectFit: 'contain', background: 'white' }} />
+                ) : (
+                  <div style={{ aspectRatio: '2/3', display: 'grid', placeItems: 'center', color: '#9ca3af', fontWeight: 900 }}>No Print Preview</div>
+                )}
+              </div>
+
+              <div>
+                <div style={{ display: 'grid', gap: '0.85rem', marginBottom: '1.2rem' }}>
+                  {[
+                    ['Status', <StatusBadge status={status} />],
+                    ['Session ID', recovery?.backendSessionId || recovery?.localGalleryId || '-'],
+                    ['Download URL', recovery?.downloadUrl || '-'],
+                    ['Created', formatDateTime(recovery?.createdAt)],
+                    ['Updated', formatDateTime(recovery?.updatedAt)],
+                    ['Error', recovery?.error || '-'],
+                    ['Backend Retry', hasBackendRetry ? 'Available' : 'Not available'],
+                  ].map(([label, value]) => (
+                    <div key={label} style={{ display: 'grid', gridTemplateColumns: '130px minmax(0, 1fr)', gap: '1rem', paddingBottom: '0.7rem', borderBottom: '1px solid #f1f5f9' }}>
+                      <div style={{ color: '#64748b', fontWeight: 900 }}>{label}</div>
+                      <div style={{ color: '#111827', fontWeight: 700, overflowWrap: 'anywhere' }}>{value}</div>
+                    </div>
+                  ))}
+                </div>
+
+                <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap' }}>
+                  <button
+                    onClick={handleRetrySave}
+                    disabled={!hasBackendRetry || saving}
+                    style={{ padding: '0.75rem 1rem', borderRadius: '8px', border: 'none', background: hasBackendRetry ? '#f97316' : '#cbd5e1', color: 'white', cursor: hasBackendRetry && !saving ? 'pointer' : 'not-allowed', fontWeight: 900 }}
+                  >
+                    {saving ? 'Retrying...' : 'Retry Save Backend'}
+                  </button>
+                  <button
+                    onClick={handlePrintAgain}
+                    disabled={!recovery?.printImage}
+                    style={{ padding: '0.75rem 1rem', borderRadius: '8px', border: '1px solid #d1d5db', background: 'white', color: '#111827', cursor: recovery?.printImage ? 'pointer' : 'not-allowed', fontWeight: 900 }}
+                  >
+                    Print Ulang
+                  </button>
+                  {recovery?.downloadUrl && (
+                    <button
+                      onClick={() => window.open(recovery.downloadUrl, '_blank', 'noopener,noreferrer')}
+                      style={{ padding: '0.75rem 1rem', borderRadius: '8px', border: '1px solid #bfdbfe', background: '#eff6ff', color: '#1d4ed8', cursor: 'pointer', fontWeight: 900 }}
+                    >
+                      Buka Gallery
+                    </button>
+                  )}
+                  <button
+                    onClick={handleRemoveSelected}
+                    disabled={!recovery}
+                    style={{ padding: '0.75rem 1rem', borderRadius: '8px', border: '1px solid #fecaca', background: recovery ? '#fee2e2' : '#f1f5f9', color: recovery ? '#dc2626' : '#94a3b8', cursor: recovery ? 'pointer' : 'not-allowed', fontWeight: 900 }}
+                  >
+                    Hapus Sesi Ini
+                  </button>
+                </div>
+
+                {history.length >= 8 && (
+                  <div style={{ marginTop: '1rem', padding: '0.85rem 1rem', borderRadius: '10px', border: '1px solid #fed7aa', background: '#fff7ed', color: '#9a3412', fontWeight: 800, fontSize: '0.85rem' }}>
+                    Browser menyimpan maksimal 10 recovery session. Kalau file foto terlalu besar, history otomatis disusutkan agar sesi terbaru tetap aman.
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+const formatBytes = (bytes = 0) => {
+  const value = Number(bytes || 0);
+  if (value < 1024) return `${value} B`;
+  const units = ['KB', 'MB', 'GB', 'TB'];
+  let size = value / 1024;
+  let unitIndex = 0;
+  while (size >= 1024 && unitIndex < units.length - 1) {
+    size /= 1024;
+    unitIndex++;
+  }
+  return `${size.toFixed(size >= 10 ? 1 : 2)} ${units[unitIndex]}`;
+};
+
+function StorageManagementTab({ adminToken }) {
+  const [stats, setStats] = useState(null);
+  const [localCacheCount, setLocalCacheCount] = useState(0);
+  const [loading, setLoading] = useState(false);
+  const [cleanupLoading, setCleanupLoading] = useState(false);
+  const [message, setMessage] = useState('');
+  const [error, setError] = useState('');
+
+  const countLocalCache = () => {
+    try {
+      const count = Object.keys(window.localStorage).filter(key => key.startsWith('potobox_gallery_')).length;
+      setLocalCacheCount(count);
+    } catch {
+      setLocalCacheCount(0);
+    }
+  };
+
+  const loadStats = async () => {
+    setLoading(true);
+    setError('');
+    try {
+      const data = await backendRequest('/api/admin/storage', adminToken);
+      setStats(data);
+      countLocalCache();
+    } catch (err) {
+      setError(err.message || 'Gagal memuat storage stats.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    loadStats();
+  }, [adminToken]);
+
+  const handleCleanupExpired = async () => {
+    setCleanupLoading(true);
+    setMessage('');
+    setError('');
+    try {
+      const result = await backendRequest('/api/admin/cleanup', adminToken, { method: 'POST' });
+      setMessage(`Cleanup selesai: ${result.deletedSessions || 0} sesi dan ${result.deletedFiles || 0} file dihapus.`);
+      await loadStats();
+    } catch (err) {
+      setError(err.message || 'Cleanup gagal.');
+    } finally {
+      setCleanupLoading(false);
+    }
+  };
+
+  const handleClearLocalCache = () => {
+    try {
+      Object.keys(window.localStorage)
+        .filter(key => key.startsWith('potobox_gallery_'))
+        .forEach(key => window.localStorage.removeItem(key));
+      countLocalCache();
+      setMessage('Cache gallery lokal browser berhasil dibersihkan.');
+    } catch {
+      setError('Gagal membersihkan cache lokal browser.');
+    }
+  };
+
+  const cards = [
+    { label: 'Storage Used', value: formatBytes(stats?.storageBytes), tone: '#f97316' },
+    { label: 'Storage Files', value: stats?.storageFiles ?? '-', tone: '#3b82f6' },
+    { label: 'Total Sessions', value: stats?.totalSessions ?? '-', tone: '#111827' },
+    { label: 'Expired Sessions', value: stats?.expiredSessions ?? '-', tone: (stats?.expiredSessions || 0) > 0 ? '#dc2626' : '#16a34a' },
+    { label: 'Finalized', value: stats?.finalizedSessions ?? '-', tone: '#16a34a' },
+    { label: 'Paid Not Finalized', value: stats?.paidSessions ?? '-', tone: '#ca8a04' },
+  ];
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
+      <div style={{ background: 'white', padding: '2rem', borderRadius: '12px', border: '1px solid #e9ecef', boxShadow: '0 2px 8px rgba(0,0,0,0.02)' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '1rem', marginBottom: '1.5rem' }}>
+          <div>
+            <h2 style={{ margin: 0, color: '#111' }}>Storage Management</h2>
+            <p style={{ margin: '0.25rem 0 0', color: '#6c757d', fontSize: '0.9rem' }}>Pantau file hasil foto/video dan bersihkan sesi expired.</p>
+          </div>
+          <button
+            type="button"
+            onClick={loadStats}
+            disabled={loading}
+            style={{ padding: '0.7rem 1rem', borderRadius: '8px', border: '1px solid #e5e7eb', background: '#f8f9fa', color: '#111', cursor: loading ? 'wait' : 'pointer', fontWeight: 'bold' }}
+          >
+            {loading ? 'Loading...' : 'Refresh'}
+          </button>
+        </div>
+
+        {message && <div style={{ marginBottom: '1rem', padding: '0.9rem 1rem', borderRadius: '10px', background: '#dcfce7', color: '#166534', fontWeight: 800 }}>{message}</div>}
+        {error && <div style={{ marginBottom: '1rem', padding: '0.9rem 1rem', borderRadius: '10px', background: '#fee2e2', color: '#991b1b', fontWeight: 800 }}>{error}</div>}
+
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '1rem', marginBottom: '1.5rem' }}>
+          {cards.map(card => (
+            <div key={card.label} style={{ padding: '1.2rem', borderRadius: '12px', border: '1px solid #e5e7eb', background: '#fff' }}>
+              <div style={{ color: '#64748b', fontSize: '0.78rem', fontWeight: 900, textTransform: 'uppercase' }}>{card.label}</div>
+              <div style={{ color: card.tone, fontSize: '2rem', fontWeight: 900, marginTop: '0.35rem' }}>{card.value}</div>
+            </div>
+          ))}
+        </div>
+
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
+          <div style={{ padding: '1.2rem', borderRadius: '12px', border: '1px solid #fed7aa', background: '#fff7ed' }}>
+            <h3 style={{ margin: '0 0 0.5rem', color: '#111827' }}>Backend Expired Cleanup</h3>
+            <p style={{ margin: '0 0 1rem', color: '#64748b', fontSize: '0.9rem', lineHeight: 1.5 }}>Menghapus sesi yang sudah expired beserta file di backend storage. Sesi aktif tidak ikut dihapus.</p>
+            <button
+              type="button"
+              onClick={handleCleanupExpired}
+              disabled={cleanupLoading}
+              style={{ width: '100%', padding: '0.85rem 1rem', borderRadius: '8px', border: 'none', background: '#f97316', color: 'white', cursor: cleanupLoading ? 'wait' : 'pointer', fontWeight: 900 }}
+            >
+              {cleanupLoading ? 'Cleaning...' : `Cleanup Expired (${stats?.expiredSessions || 0})`}
+            </button>
+          </div>
+
+          <div style={{ padding: '1.2rem', borderRadius: '12px', border: '1px solid #dbeafe', background: '#eff6ff' }}>
+            <h3 style={{ margin: '0 0 0.5rem', color: '#111827' }}>Browser Local Gallery Cache</h3>
+            <p style={{ margin: '0 0 1rem', color: '#64748b', fontSize: '0.9rem', lineHeight: 1.5 }}>{localCacheCount} cache gallery lokal tersimpan di browser booth ini. Ini hanya fallback lokal, bukan backend gallery.</p>
+            <button
+              type="button"
+              onClick={handleClearLocalCache}
+              disabled={localCacheCount === 0}
+              style={{ width: '100%', padding: '0.85rem 1rem', borderRadius: '8px', border: '1px solid #bfdbfe', background: localCacheCount ? 'white' : '#dbeafe', color: '#1d4ed8', cursor: localCacheCount ? 'pointer' : 'not-allowed', fontWeight: 900 }}
+            >
+              Clear Local Cache
+            </button>
+          </div>
+        </div>
+
+        {stats?.storageDir && (
+          <div style={{ marginTop: '1rem', padding: '0.85rem 1rem', borderRadius: '10px', background: '#f8fafc', color: '#64748b', fontSize: '0.82rem', overflowWrap: 'anywhere' }}>
+            Storage path: {stats.storageDir}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -309,7 +1687,7 @@ function FrameSettingsTab() {
   const [editingFrame, setEditingFrame] = useState(null);
 
   const loadFrames = async () => {
-    const frames = await fetchCustomFrames();
+    const frames = await fetchCustomFrames({ includeInvalid: true, includeDisabled: true });
     setCustomFrames(frames);
   };
 
@@ -344,6 +1722,17 @@ function FrameSettingsTab() {
     try {
       // Validate JSON
       const parsed = JSON.parse(jsonText);
+      const validation = validateFrameConfig({
+        ...(Array.isArray(parsed) ? { slots: parsed } : parsed),
+        url: editingFrame.url,
+        frameImage: editingFrame.url,
+        width: editingFrame.width,
+        height: editingFrame.height,
+      });
+      if (!validation.isValid) {
+        alert(`Config belum aman dipakai:\n- ${validation.errors.join('\n- ')}`);
+        return;
+      }
       const fileName = editingFrame.url.split('/').pop();
       const baseName = fileName.split('.')[0];
       const jsonPath = `frames/${baseName}.json`;
@@ -422,10 +1811,24 @@ function FrameSettingsTab() {
     }
   };
 
+  const handleToggleComposerFrameDisabled = async (frame) => {
+    if (!frame?.id) return;
+    setCustomFrameDisabled(frame.id, !frame.disabled);
+    const nextFrame = { ...frame, disabled: !frame.disabled };
+    setSelectedFrame(prev => prev?.id === frame.id ? { ...prev, disabled: !frame.disabled } : prev);
+    setFrames(prev => prev.map(item => item.id === frame.id ? nextFrame : item));
+  };
+
+  const handleToggleFrameDisabled = async (frame) => {
+    if (!frame?.id) return;
+    setCustomFrameDisabled(frame.id, !frame.disabled);
+    await loadFrames();
+  };
+
   // Combine default frames and custom frames for the list
   const allFrames = [
     ...FRAMES,
-    ...customFrames.map(cf => ({ ...cf, type: 'custom', tone: '#f8f9fa', accent: '#adb5bd' }))
+    ...customFrames.map(cf => ({ ...cf, type: 'custom', tone: '#f8f9fa', accent: cf.disabled ? '#94a3b8' : cf.validation?.isValid ? '#10b981' : '#ef4444' }))
   ];
 
   const filteredFrames = activeFilter === 'Semua' 
@@ -541,11 +1944,29 @@ function FrameSettingsTab() {
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', borderTop: '1px solid #e9ecef', paddingTop: '1.5rem' }}>
           <div>
             <label style={{ display: 'block', marginBottom: '0.2rem', fontWeight: 'bold', color: '#495057', fontSize: '0.85rem' }}>Status</label>
-            <div style={{ color: '#10b981', fontWeight: 'bold', fontSize: '0.9rem', display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
-              <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: '#10b981', display: 'inline-block' }}></span> Aktif
+            <div style={{ color: editingFrame?.disabled ? '#64748b' : editingFrame?.validation?.isValid === false ? '#dc2626' : '#10b981', fontWeight: 'bold', fontSize: '0.9rem', display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+              <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: editingFrame?.disabled ? '#94a3b8' : editingFrame?.validation?.isValid === false ? '#dc2626' : '#10b981', display: 'inline-block' }}></span>
+              {editingFrame?.disabled ? 'Nonaktif' : editingFrame?.validation?.isValid === false ? 'Rusak / Perlu diperbaiki' : 'Aktif'}
             </div>
+            {editingFrame?.validation?.errors?.length > 0 && (
+              <div style={{ marginTop: '0.55rem', color: '#b91c1c', fontSize: '0.78rem', fontWeight: 800 }}>
+                {editingFrame.validation.errors.slice(0, 2).join(' ')}
+              </div>
+            )}
           </div>
           <div style={{ display: 'flex', gap: '1rem' }}>
+            {editingFrame?.id?.startsWith('custom_') && (
+              <button
+                type="button"
+                onClick={async () => {
+                  await handleToggleFrameDisabled(editingFrame);
+                  setEditingFrame(prev => prev ? { ...prev, disabled: !prev.disabled } : prev);
+                }}
+                style={{ padding: '0.8rem 1.4rem', background: editingFrame.disabled ? '#dcfce7' : '#f1f5f9', color: editingFrame.disabled ? '#166534' : '#475569', border: 'none', borderRadius: '8px', cursor: 'pointer', fontWeight: 'bold', fontSize: '1rem' }}
+              >
+                {editingFrame.disabled ? 'Aktifkan' : 'Nonaktifkan'}
+              </button>
+            )}
             {editingFrame?.id?.startsWith('custom_') && (
               <button 
                 onClick={() => handleDeleteFrame(editingFrame)}
@@ -627,10 +2048,33 @@ function FrameSettingsTab() {
                 boxShadow: '0 4px 12px rgba(0,0,0,0.05)',
                 cursor: 'pointer',
                 transition: 'transform 0.2s',
+                opacity: frame.disabled ? 0.55 : 1,
               }}
               onMouseEnter={(e) => e.currentTarget.style.transform = 'scale(1.03)'}
               onMouseLeave={(e) => e.currentTarget.style.transform = 'scale(1)'}
             >
+              {frame.id?.startsWith('custom_') && (
+                <div style={{ position: 'absolute', top: 8, left: 8, right: 8, zIndex: 12, display: 'flex', justifyContent: 'space-between', gap: '0.35rem', alignItems: 'center' }}>
+                  <span style={{ padding: '0.18rem 0.45rem', borderRadius: '999px', background: frame.disabled ? '#e5e7eb' : frame.validation?.isValid ? '#dcfce7' : '#fee2e2', color: frame.disabled ? '#475569' : frame.validation?.isValid ? '#166534' : '#b91c1c', fontSize: '0.62rem', fontWeight: 900 }}>
+                    {frame.disabled ? 'DISABLED' : frame.validation?.isValid ? 'VALID' : 'RUSAK'}
+                  </span>
+                  {Number(frame.usageCount || 0) > 0 && (
+                    <span style={{ padding: '0.18rem 0.4rem', borderRadius: '999px', background: '#111827', color: 'white', fontSize: '0.62rem', fontWeight: 900 }}>
+                      {frame.usageCount}x
+                    </span>
+                  )}
+                  <button
+                    type="button"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      handleToggleFrameDisabled(frame);
+                    }}
+                    style={{ border: 'none', borderRadius: '999px', background: 'rgba(17,24,39,0.78)', color: 'white', fontSize: '0.62rem', fontWeight: 900, padding: '0.2rem 0.45rem', cursor: 'pointer' }}
+                  >
+                    {frame.disabled ? 'ON' : 'OFF'}
+                  </button>
+                </div>
+              )}
               {frame.id?.startsWith('custom_') ? (
                  <div style={{ width: '100%', height: '100%', backgroundImage: `url(${frame.url})`, backgroundSize: 'contain', backgroundPosition: 'center', backgroundRepeat: 'no-repeat', zIndex: 5 }} />
               ) : (
@@ -651,9 +2095,17 @@ function FrameSettingsTab() {
   );
 }
 
-function FramePhotoComposerTab() {
+function FramePhotoComposerTab({ adminToken }) {
   const [frames, setFrames] = useState([]);
   const [selectedFrame, setSelectedFrame] = useState(null);
+  const [frameMeta, setFrameMeta] = useState({
+    templateType: 'strip',
+    paperSize: 'strip-2x6',
+    orientation: 'portrait',
+    photoCount: 3,
+    printMode: 'auto',
+    printCopies: 2,
+  });
   const [isUploading, setIsUploading] = useState(false);
   const [slots, setSlots] = useState([]);
   const [selectedSlotIdx, setSelectedSlotIdx] = useState(null);
@@ -668,16 +2120,17 @@ function FramePhotoComposerTab() {
   const [frameImgObj, setFrameImgObj] = useState(null);
   const [canvasScale, setCanvasScale] = useState(1);
 
-  // Frame base dimensions (what Figma exports at)
-  const FRAME_BASE_W = 1080;
-  const FRAME_BASE_H = 1920;
+  // Frame base dimensions follow the uploaded PNG's natural size. This keeps
+  // slot coordinates aligned even when custom frames are not exported 1080x1920.
+  const frameBaseWidth = Number(frameImgObj?.naturalWidth || selectedFrame?.width || 1080);
+  const frameBaseHeight = Number(frameImgObj?.naturalHeight || selectedFrame?.height || 1920);
 
   useEffect(() => {
     loadFrames();
   }, []);
 
   const loadFrames = async () => {
-    const fetched = await fetchCustomFrames();
+    const fetched = await fetchCustomFrames({ includeInvalid: true, includeDisabled: true });
     setFrames(fetched);
   };
 
@@ -696,6 +2149,14 @@ function FramePhotoComposerTab() {
     } else {
       setSlots([]);
     }
+    setFrameMeta({
+      templateType: selectedFrame.templateType || 'strip',
+      paperSize: selectedFrame.paperSize || (selectedFrame.templateType === 'print_sheet' ? '4r' : 'strip-2x6'),
+      orientation: selectedFrame.orientation || 'portrait',
+      photoCount: Number(selectedFrame.photoCount || selectedFrame.layoutCount || selectedFrame.slots?.length || 3),
+      printMode: selectedFrame.printMode || (selectedFrame.templateType === 'print_sheet' ? 'same' : 'auto'),
+      printCopies: Number(selectedFrame.printCopies || 2),
+    });
     setSelectedSlotIdx(null);
     setPreviewDataUrl(null);
   }, [selectedFrame]);
@@ -709,8 +2170,8 @@ function FramePhotoComposerTab() {
     const canvas = canvasRef.current;
     if (!canvas) return { x: 0, y: 0 };
     const rect = canvas.getBoundingClientRect();
-    const scaleX = FRAME_BASE_W / rect.width;
-    const scaleY = FRAME_BASE_H / rect.height;
+    const scaleX = frameBaseWidth / rect.width;
+    const scaleY = frameBaseHeight / rect.height;
     return {
       x: Math.round((e.clientX - rect.left) * scaleX),
       y: Math.round((e.clientY - rect.top) * scaleY),
@@ -721,17 +2182,17 @@ function FramePhotoComposerTab() {
     const canvas = canvasRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext('2d');
-    canvas.width = FRAME_BASE_W;
-    canvas.height = FRAME_BASE_H;
+    canvas.width = frameBaseWidth;
+    canvas.height = frameBaseHeight;
 
     // Draw background
     ctx.fillStyle = '#f0f0f0';
-    ctx.fillRect(0, 0, FRAME_BASE_W, FRAME_BASE_H);
+    ctx.fillRect(0, 0, frameBaseWidth, frameBaseHeight);
 
     // Draw checkerboard (to indicate transparency)
     const size = 40;
-    for (let x = 0; x < FRAME_BASE_W; x += size) {
-      for (let y = 0; y < FRAME_BASE_H; y += size) {
+    for (let x = 0; x < frameBaseWidth; x += size) {
+      for (let y = 0; y < frameBaseHeight; y += size) {
         ctx.fillStyle = ((x / size + y / size) % 2 === 0) ? '#e8e8e8' : '#d0d0d0';
         ctx.fillRect(x, y, size, size);
       }
@@ -739,7 +2200,7 @@ function FramePhotoComposerTab() {
 
     // Draw frame overlay
     if (frameImgObj) {
-      ctx.drawImage(frameImgObj, 0, 0, FRAME_BASE_W, FRAME_BASE_H);
+      ctx.drawImage(frameImgObj, 0, 0, frameBaseWidth, frameBaseHeight);
     }
 
     // Draw slots
@@ -834,6 +2295,7 @@ function FramePhotoComposerTab() {
     const { x, y } = getCanvasCoords(e);
     const newSlot = {
       id: `photo${slots.length + 1}`,
+      source: `photo_${Math.min(slots.length + 1, Number(frameMeta.photoCount) || slots.length + 1)}`,
       x: Math.round(Math.min(x, drawStart.x)),
       y: Math.round(Math.min(y, drawStart.y)),
       width: Math.round(Math.abs(x - drawStart.x)),
@@ -853,7 +2315,7 @@ function FramePhotoComposerTab() {
   const updateSelectedSlot = (field, value) => {
     if (selectedSlotIdx === null) return;
     setSlots(prev => prev.map((s, i) =>
-      i === selectedSlotIdx ? { ...s, [field]: parseInt(value) || 0 } : s
+      i === selectedSlotIdx ? { ...s, [field]: field === 'source' ? value : parseInt(value) || 0 } : s
     ));
   };
 
@@ -867,8 +2329,8 @@ function FramePhotoComposerTab() {
     setIsGeneratingPreview(true);
     try {
       const canvas = document.createElement('canvas');
-      canvas.width = FRAME_BASE_W;
-      canvas.height = FRAME_BASE_H;
+      canvas.width = frameBaseWidth;
+      canvas.height = frameBaseHeight;
       const ctx = canvas.getContext('2d');
 
       // White background
@@ -911,7 +2373,7 @@ function FramePhotoComposerTab() {
         img.onerror = reject;
         img.src = selectedFrame.url;
       });
-      ctx.drawImage(overlayImg, 0, 0, FRAME_BASE_W, FRAME_BASE_H);
+      ctx.drawImage(overlayImg, 0, 0, frameBaseWidth, frameBaseHeight);
 
       setPreviewDataUrl(canvas.toDataURL('image/png'));
     } catch (err) {
@@ -926,20 +2388,32 @@ function FramePhotoComposerTab() {
       alert('Pilih frame dan tambahkan minimal 1 slot foto terlebih dahulu.');
       return;
     }
+    const jsonData = {
+      frameImage: selectedFrame.url,
+      width: frameBaseWidth,
+      height: frameBaseHeight,
+      ...frameMeta,
+      active: true,
+      photoCount: Number(frameMeta.photoCount) || slots.length,
+      layoutCount: Number(frameMeta.photoCount) || slots.length,
+      printCopies: Number(frameMeta.printCopies) || 1,
+      slots: slots.map((s, i) => ({
+        id: s.id || `photo${i + 1}`,
+        source: s.source || `photo_${Math.min(i + 1, Number(frameMeta.photoCount) || i + 1)}`,
+        x: s.x, y: s.y,
+        width: s.width, height: s.height,
+        borderRadius: s.borderRadius || 0,
+        rotate: s.rotate || 0,
+      })),
+    };
+    const validation = validateFrameConfig(jsonData);
+    if (!validation.isValid) {
+      alert(`Frame belum aman dipakai customer:\n- ${validation.errors.join('\n- ')}`);
+      return;
+    }
+
     setIsSavingJson(true);
     try {
-      const jsonData = {
-        frameImage: selectedFrame.url,
-        width: FRAME_BASE_W,
-        height: FRAME_BASE_H,
-        slots: slots.map((s, i) => ({
-          id: s.id || `photo${i + 1}`,
-          x: s.x, y: s.y,
-          width: s.width, height: s.height,
-          borderRadius: s.borderRadius || 0,
-          rotate: s.rotate || 0,
-        })),
-      };
 
       const fileName = selectedFrame.url.split('/').pop();
       const baseName = fileName.split('?')[0].split('.')[0];
@@ -955,10 +2429,30 @@ function FramePhotoComposerTab() {
         });
 
       if (error) throw error;
-      alert(`✅ Konfigurasi ${slots.length} slot foto berhasil disimpan untuk frame "${selectedFrame.name}"!`);
+      setCustomFrameDisabled(selectedFrame.id, false);
+      if (adminToken) {
+        await backendRequest('/api/admin/frames', adminToken, {
+          method: 'POST',
+          body: JSON.stringify({
+            id: selectedFrame.id,
+            name: selectedFrame.name,
+            category: 'custom',
+            layoutCount: Number(frameMeta.photoCount) || slots.length,
+            imageUrl: selectedFrame.url,
+            slotJson: JSON.stringify(jsonData),
+            templateType: frameMeta.templateType,
+            paperSize: frameMeta.paperSize,
+            orientation: frameMeta.orientation,
+            printMode: frameMeta.printMode,
+            printCopies: Number(frameMeta.printCopies) || 1,
+            active: true,
+          }),
+        });
+      }
+      const warningText = validation.warnings.length ? `\n\nCatatan:\n- ${validation.warnings.join('\n- ')}` : '';
+      alert(`✅ Konfigurasi ${slots.length} slot foto berhasil disimpan untuk frame "${selectedFrame.name}"!${warningText}`);
       await loadFrames();
-      const updated = frames.find(f => f.id === selectedFrame.id);
-      if (updated) setSelectedFrame({ ...selectedFrame, ...jsonData });
+      setSelectedFrame({ ...selectedFrame, ...jsonData, disabled: false, validation });
     } catch (err) {
       alert('Gagal menyimpan: ' + err.message);
     } finally {
@@ -1010,6 +2504,17 @@ function FramePhotoComposerTab() {
   };
 
   const selectedSlot = selectedSlotIdx !== null ? slots[selectedSlotIdx] : null;
+  const currentFrameDraftValidation = selectedFrame
+    ? validateFrameConfig({
+      ...selectedFrame,
+      frameImage: selectedFrame.url,
+      width: frameBaseWidth,
+      height: frameBaseHeight,
+      ...frameMeta,
+      active: !selectedFrame.disabled,
+      slots,
+    })
+    : null;
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
@@ -1022,6 +2527,47 @@ function FramePhotoComposerTab() {
           {isUploading ? '⏳ Uploading...' : '+ Upload Frame PNG'}
           <input type="file" accept="image/png" style={{ display: 'none' }} onChange={handleUploadNewFrame} disabled={isUploading} />
         </label>
+      </div>
+
+      <div style={{ background: 'white', borderRadius: '16px', border: '1px solid #e9ecef', padding: '1.25rem 1.5rem' }}>
+        <h3 style={{ margin: '0 0 1rem', color: '#111', fontSize: '1rem' }}>Template & Print Output</h3>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '1rem' }}>
+          <div>
+            <label style={{ display: 'block', marginBottom: '0.35rem', fontSize: '0.75rem', fontWeight: 'bold', color: '#6b7280' }}>Jumlah Foto User</label>
+            <select
+              value={frameMeta.photoCount}
+              onChange={(event) => setFrameMeta(prev => ({ ...prev, photoCount: Number(event.target.value) }))}
+              style={{ width: '100%', padding: '0.65rem', borderRadius: '8px', border: '1px solid #d1d5db', background: 'white', fontWeight: 'bold' }}
+            >
+              {[1, 3, 4, 6, 8].map(count => <option key={count} value={count}>{count} foto</option>)}
+            </select>
+          </div>
+          <div>
+            <label style={{ display: 'block', marginBottom: '0.35rem', fontSize: '0.75rem', fontWeight: 'bold', color: '#6b7280' }}>Ukuran Output</label>
+            <select
+              value={frameMeta.paperSize}
+              onChange={(event) => setFrameMeta(prev => ({ ...prev, paperSize: event.target.value }))}
+              style={{ width: '100%', padding: '0.65rem', borderRadius: '8px', border: '1px solid #d1d5db', background: 'white', fontWeight: 'bold' }}
+            >
+              <option value="strip-2x6">Strip 2x6</option>
+              <option value="2r">2R</option>
+              <option value="3r">3R</option>
+              <option value="4r">4R</option>
+              <option value="5r">5R</option>
+            </select>
+          </div>
+          <div>
+            <label style={{ display: 'block', marginBottom: '0.35rem', fontSize: '0.75rem', fontWeight: 'bold', color: '#6b7280' }}>Jumlah Strip di Kertas</label>
+            <input
+              type="number"
+              min="1"
+              max="4"
+              value={frameMeta.printCopies}
+              onChange={(event) => setFrameMeta(prev => ({ ...prev, printCopies: Number(event.target.value) }))}
+              style={{ width: '100%', padding: '0.65rem', borderRadius: '8px', border: '1px solid #d1d5db', background: 'white', fontWeight: 'bold' }}
+            />
+          </div>
+        </div>
       </div>
 
       <div style={{ display: 'grid', gridTemplateColumns: '260px 1fr 280px', gap: '1.5rem', alignItems: 'start' }}>
@@ -1046,15 +2592,26 @@ function FramePhotoComposerTab() {
                 alignItems: 'center',
                 gap: '0.75rem',
                 transition: 'all 0.2s',
+                opacity: frame.disabled ? 0.55 : 1,
               }}
             >
               <img src={frame.url} alt={frame.name} style={{ width: '48px', height: '72px', objectFit: 'cover', borderRadius: '6px', border: '1px solid #e9ecef', flexShrink: 0, background: '#e5e7eb' }} />
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{ fontWeight: 'bold', color: '#111', fontSize: '0.85rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{frame.name}</div>
-                <div style={{ fontSize: '0.75rem', color: frame.slots ? '#10b981' : '#9ca3af', marginTop: '0.2rem' }}>
-                  {frame.slots ? `✅ ${frame.slots.length} slot` : '⚠️ Belum ada slot'}
+                <div style={{ fontSize: '0.75rem', color: frame.disabled ? '#64748b' : frame.validation?.isValid ? '#10b981' : '#ef4444', marginTop: '0.2rem', fontWeight: 800 }}>
+                  {frame.disabled ? 'Nonaktif' : frame.validation?.isValid ? `Valid · ${frame.slots.length} slot` : 'Rusak / belum aman'}
+                </div>
+                <div style={{ fontSize: '0.7rem', color: '#6b7280', marginTop: '0.15rem' }}>
+                  {(frame.templateType || 'strip').replace('_', ' ')} · {frame.photoCount || frame.layoutCount || frame.slots?.length || 0} foto · {Number(frame.usageCount || 0)}x dipakai
                 </div>
               </div>
+              <button
+                onClick={(e) => { e.stopPropagation(); handleToggleComposerFrameDisabled(frame); }}
+                title={frame.disabled ? 'Aktifkan frame' : 'Nonaktifkan frame'}
+                style={{ background: frame.disabled ? '#dcfce7' : '#f1f5f9', border: '1px solid #e5e7eb', color: frame.disabled ? '#166534' : '#475569', cursor: 'pointer', fontSize: '0.72rem', padding: '0.25rem 0.45rem', borderRadius: '999px', fontWeight: 900, flexShrink: 0 }}
+              >
+                {frame.disabled ? 'ON' : 'OFF'}
+              </button>
               <button
                 onClick={(e) => { e.stopPropagation(); handleDeleteFrame(frame); }}
                 style={{ background: 'transparent', border: 'none', color: '#ef4444', cursor: 'pointer', fontSize: '1rem', padding: '0.2rem', flexShrink: 0 }}
@@ -1084,19 +2641,39 @@ function FramePhotoComposerTab() {
                   <button
                     onClick={handleGeneratePreview}
                     disabled={slots.length === 0 || isGeneratingPreview}
-                    style={{ padding: '0.5rem 1rem', background: '#8b5cf6', color: 'white', border: 'none', borderRadius: '8px', cursor: 'pointer', fontWeight: 'bold', fontSize: '0.85rem', opacity: slots.length === 0 ? 0.5 : 1 }}
+                    style={{ padding: '0.5rem 1rem', background: '#f97316', color: 'white', border: 'none', borderRadius: '8px', cursor: 'pointer', fontWeight: 'bold', fontSize: '0.85rem', opacity: slots.length === 0 ? 0.5 : 1 }}
                   >
                     {isGeneratingPreview ? '⏳' : '👁 Preview'}
                   </button>
                   <button
                     onClick={handleSaveConfig}
-                    disabled={slots.length === 0 || isSavingJson}
-                    style={{ padding: '0.5rem 1rem', background: '#10b981', color: 'white', border: 'none', borderRadius: '8px', cursor: 'pointer', fontWeight: 'bold', fontSize: '0.85rem', opacity: slots.length === 0 ? 0.5 : 1 }}
+                    disabled={slots.length === 0 || isSavingJson || currentFrameDraftValidation?.errors?.length > 0}
+                    style={{ padding: '0.5rem 1rem', background: currentFrameDraftValidation?.errors?.length ? '#cbd5e1' : '#f97316', color: 'white', border: 'none', borderRadius: '8px', cursor: currentFrameDraftValidation?.errors?.length ? 'not-allowed' : 'pointer', fontWeight: 'bold', fontSize: '0.85rem', opacity: slots.length === 0 ? 0.5 : 1 }}
                   >
                     {isSavingJson ? '⏳ Menyimpan...' : '💾 Simpan Config'}
                   </button>
                 </div>
               </div>
+
+              {currentFrameDraftValidation && (
+                <div style={{ display: 'grid', gap: '0.45rem' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', flexWrap: 'wrap', padding: '0.7rem 0.85rem', borderRadius: '10px', border: currentFrameDraftValidation.isValid ? '1px solid #bbf7d0' : '1px solid #fecaca', background: currentFrameDraftValidation.isValid ? '#f0fdf4' : '#fef2f2', color: currentFrameDraftValidation.isValid ? '#166534' : '#991b1b', fontWeight: 900, fontSize: '0.82rem' }}>
+                    <span>{currentFrameDraftValidation.isValid ? 'Frame aman dipakai customer' : 'Frame belum aman dipakai customer'}</span>
+                    <span>{slots.length} slot</span>
+                    <span>{Number(frameMeta.photoCount) || 0} foto user</span>
+                  </div>
+                  {currentFrameDraftValidation.errors.length > 0 && (
+                    <div style={{ padding: '0.7rem 0.85rem', borderRadius: '10px', background: '#fff7ed', color: '#9a3412', fontSize: '0.78rem', fontWeight: 800, lineHeight: 1.45 }}>
+                      {currentFrameDraftValidation.errors.slice(0, 4).map((error, index) => <div key={index}>- {error}</div>)}
+                    </div>
+                  )}
+                  {currentFrameDraftValidation.warnings.length > 0 && (
+                    <div style={{ padding: '0.7rem 0.85rem', borderRadius: '10px', background: '#fffbeb', color: '#92400e', fontSize: '0.78rem', fontWeight: 800, lineHeight: 1.45 }}>
+                      {currentFrameDraftValidation.warnings.slice(0, 3).map((warning, index) => <div key={index}>- {warning}</div>)}
+                    </div>
+                  )}
+                </div>
+              )}
 
               <div style={{ position: 'relative', lineHeight: 0, borderRadius: '8px', overflow: 'hidden', border: '2px solid #e9ecef', cursor: isDrawing ? 'crosshair' : 'default', userSelect: 'none' }}>
                 <canvas
@@ -1133,6 +2710,18 @@ function FramePhotoComposerTab() {
               </div>
             ) : (
               <div style={{ display: 'flex', flexDirection: 'column', gap: '0.6rem' }}>
+                <div>
+                  <label style={{ display: 'block', fontSize: '0.75rem', fontWeight: 'bold', color: '#6b7280', marginBottom: '0.25rem' }}>Source Foto</label>
+                  <select
+                    value={selectedSlot.source || `photo_${selectedSlotIdx + 1}`}
+                    onChange={(e) => updateSelectedSlot('source', e.target.value)}
+                    style={{ width: '100%', padding: '0.5rem 0.75rem', border: '1px solid #d1d5db', borderRadius: '6px', fontSize: '0.9rem', background: '#f9fafb', fontWeight: 'bold' }}
+                  >
+                    {Array.from({ length: Number(frameMeta.photoCount) || 1 }, (_, index) => (
+                      <option key={index} value={`photo_${index + 1}`}>Foto {index + 1}</option>
+                    ))}
+                  </select>
+                </div>
                 {[
                   { label: 'X (pixel)', field: 'x' },
                   { label: 'Y (pixel)', field: 'y' },
@@ -1181,6 +2770,7 @@ function FramePhotoComposerTab() {
                     }}
                   >
                     <span>📷 Slot {i + 1}</span>
+                    <span style={{ color: '#6b7280' }}>{s.source || `photo_${i + 1}`}</span>
                     <span style={{ color: '#9ca3af' }}>{s.width}×{s.height}</span>
                   </div>
                 ))}
@@ -1212,6 +2802,8 @@ function TransactionTab({ adminToken }) {
   const [paymentLogs, setPaymentLogs] = useState([]);
   const [logsLoading, setLogsLoading] = useState(false);
   const [logsError, setLogsError] = useState('');
+  const [transactionPage, setTransactionPage] = useState(1);
+  const [transactionPageSize, setTransactionPageSize] = useState(10);
 
   const loadPaymentLogs = async () => {
     if (!adminToken) return;
@@ -1239,6 +2831,15 @@ function TransactionTab({ adminToken }) {
     }
     return acc;
   }, 0);
+  const transactionTotalPages = Math.max(1, Math.ceil(paymentLogs.length / transactionPageSize));
+  const transactionStartIndex = (transactionPage - 1) * transactionPageSize;
+  const paginatedPaymentLogs = paymentLogs.slice(transactionStartIndex, transactionStartIndex + transactionPageSize);
+
+  useEffect(() => {
+    if (transactionPage > transactionTotalPages) {
+      setTransactionPage(transactionTotalPages);
+    }
+  }, [transactionPage, transactionTotalPages]);
 
   const handleClear = () => {
     if (window.confirm('Yakin ingin menghapus semua riwayat transaksi? Laporan ini tidak bisa dikembalikan.')) {
@@ -1290,7 +2891,7 @@ function TransactionTab({ adminToken }) {
           <button onClick={loadPaymentLogs} style={{ padding: '0.6rem 1rem', background: '#f8f9fa', color: '#111', border: '1px solid #e9ecef', borderRadius: '6px', cursor: 'pointer', fontWeight: 'bold' }}>
             Refresh
           </button>
-          <button onClick={exportPaymentLogsToCSV} style={{ padding: '0.6rem 1rem', background: '#00e58c', color: '#111', border: 'none', borderRadius: '6px', cursor: 'pointer', fontWeight: 'bold' }}>
+          <button onClick={exportPaymentLogsToCSV} style={{ padding: '0.6rem 1rem', background: '#f97316', color: 'white', border: 'none', borderRadius: '6px', cursor: 'pointer', fontWeight: 'bold' }}>
             ↓ Export CSV
           </button>
           <button onClick={handleClear} style={{ display: 'none', padding: '0.6rem 1rem', background: '#fee2e2', color: '#ef4444', border: 'none', borderRadius: '6px', cursor: 'pointer', fontWeight: 'bold' }}>
@@ -1328,7 +2929,7 @@ function TransactionTab({ adminToken }) {
               </tr>
             </thead>
             <tbody>
-              {paymentLogs.map((log) => (
+              {paginatedPaymentLogs.map((log) => (
                 <tr key={log.id} style={{ borderBottom: '1px solid #f1f3f5' }}>
                   <td style={{ padding: '1rem 0', fontFamily: 'monospace', color: '#111', fontSize: '0.85rem' }}>
                     <div>{String(log.paymentId || '').slice(0, 18)}...</div>
@@ -1348,24 +2949,724 @@ function TransactionTab({ adminToken }) {
               ))}
             </tbody>
           </table>
+          <AdminPagination
+            page={transactionPage}
+            totalPages={transactionTotalPages}
+            pageSize={transactionPageSize}
+            total={paymentLogs.length}
+            onPageChange={setTransactionPage}
+            onPageSizeChange={(size) => {
+              setTransactionPageSize(size);
+              setTransactionPage(1);
+            }}
+          />
         </div>
       )}
     </div>
   );
 }
 
-function BackendListTab({ title, description, endpoint, adminToken, columns }) {
-  const [rows, setRows] = useState([]);
+function MonitoringTab({ adminToken }) {
+  const [logs, setLogs] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const [category, setCategory] = useState('');
+  const [query, setQuery] = useState('');
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(10);
 
-  const loadRows = async () => {
+  const loadLogs = async () => {
     if (!adminToken) return;
     setLoading(true);
     setError('');
     try {
-      const data = await backendRequest(endpoint, adminToken);
-      setRows(Array.isArray(data) ? data : []);
+      const rows = await fetchAllAdminRows('/api/admin/audit-logs', adminToken, { q: 'monitoring.error' });
+      setLogs(rows.filter(row => String(row.action || '').startsWith('monitoring.error.')));
+    } catch (err) {
+      setError(err.message || 'Gagal memuat monitoring error.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    loadLogs();
+  }, [adminToken]);
+
+  const filteredLogs = logs.filter((log) => {
+    const logCategory = log.metadata?.category || String(log.action || '').replace('monitoring.error.', '');
+    if (category && logCategory !== category) return false;
+    if (query.trim()) {
+      const text = [
+        log.action,
+        log.resource,
+        log.metadata?.message,
+        log.metadata?.source,
+        log.metadata ? JSON.stringify(log.metadata) : '',
+      ].filter(Boolean).join(' ').toLowerCase();
+      if (!text.includes(query.trim().toLowerCase())) return false;
+    }
+    return true;
+  });
+  const totals = filteredLogs.reduce((acc, log) => {
+    const key = log.metadata?.category || String(log.action || '').replace('monitoring.error.', '') || 'system';
+    acc[key] = (acc[key] || 0) + 1;
+    return acc;
+  }, {});
+  const totalPages = Math.max(1, Math.ceil(filteredLogs.length / pageSize));
+  const startIndex = (page - 1) * pageSize;
+  const paginatedLogs = filteredLogs.slice(startIndex, startIndex + pageSize);
+
+  useEffect(() => {
+    if (page > totalPages) setPage(totalPages);
+  }, [page, totalPages]);
+
+  const categoryLabel = (value) => ({
+    save_photo: 'Gagal Save Foto',
+    print: 'Gagal Print',
+    whatsapp: 'Gagal WhatsApp',
+    payment: 'Gagal Payment',
+    system: 'System',
+  }[value] || value);
+
+  return (
+    <div style={{ background: 'white', padding: '2rem', borderRadius: '12px', border: '1px solid #e9ecef', boxShadow: '0 2px 8px rgba(0,0,0,0.02)' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', gap: '1rem', alignItems: 'flex-start', marginBottom: '1.25rem', flexWrap: 'wrap' }}>
+        <div>
+          <h2 style={{ margin: 0, color: '#111' }}>Monitoring Error</h2>
+          <p style={{ margin: '0.25rem 0 0', color: '#6c757d', fontSize: '0.9rem' }}>Ringkasan error penting: save foto, print, WhatsApp, dan payment.</p>
+        </div>
+        <button onClick={loadLogs} disabled={loading} style={{ padding: '0.65rem 1rem', background: '#f8f9fa', color: '#111827', border: '1px solid #e5e7eb', borderRadius: '8px', cursor: loading ? 'wait' : 'pointer', fontWeight: 'bold' }}>
+          {loading ? 'Loading...' : 'Refresh'}
+        </button>
+      </div>
+
+      {error && <div style={{ marginBottom: '1rem', padding: '0.85rem 1rem', borderRadius: '10px', background: '#fee2e2', color: '#b91c1c', fontWeight: 800 }}>{error}</div>}
+
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: '0.8rem', marginBottom: '1rem' }}>
+        {['save_photo', 'print', 'whatsapp', 'payment'].map(key => (
+          <div key={key} style={{ padding: '1rem', borderRadius: '10px', background: totals[key] ? '#fff7ed' : '#f8fafc', border: totals[key] ? '1px solid #fed7aa' : '1px solid #e5e7eb' }}>
+            <div style={{ color: totals[key] ? '#c2410c' : '#64748b', fontSize: '0.78rem', fontWeight: 900 }}>{categoryLabel(key)}</div>
+            <div style={{ fontSize: '1.7rem', fontWeight: 900 }}>{totals[key] || 0}</div>
+          </div>
+        ))}
+      </div>
+
+      <div style={{ display: 'grid', gridTemplateColumns: '220px minmax(180px, 1fr)', gap: '0.75rem', padding: '1rem', borderRadius: '12px', background: '#f8fafc', border: '1px solid #e5e7eb', marginBottom: '1rem' }}>
+        <select value={category} onChange={event => { setCategory(event.target.value); setPage(1); }} style={{ padding: '0.7rem 0.8rem', border: '1px solid #d1d5db', borderRadius: '8px', background: 'white' }}>
+          <option value="">Semua kategori</option>
+          <option value="save_photo">Gagal Save Foto</option>
+          <option value="print">Gagal Print</option>
+          <option value="whatsapp">Gagal WhatsApp</option>
+          <option value="payment">Gagal Payment</option>
+          <option value="system">System</option>
+        </select>
+        <input value={query} onChange={event => { setQuery(event.target.value); setPage(1); }} placeholder="Cari pesan, session, source..." style={{ padding: '0.7rem 0.8rem', border: '1px solid #d1d5db', borderRadius: '8px' }} />
+      </div>
+
+      {loading ? (
+        <div style={{ textAlign: 'center', padding: '4rem 2rem', border: '1px dashed #ced4da', borderRadius: '8px', color: '#6c757d' }}>Memuat monitoring error...</div>
+      ) : filteredLogs.length === 0 ? (
+        <div style={{ textAlign: 'center', padding: '4rem 2rem', border: '1px dashed #ced4da', borderRadius: '8px', color: '#10b981', fontWeight: 900 }}>Belum ada error penting tercatat.</div>
+      ) : (
+        <>
+          <div style={{ display: 'grid', gap: '0.65rem' }}>
+            {paginatedLogs.map(log => {
+              const key = log.metadata?.category || String(log.action || '').replace('monitoring.error.', '') || 'system';
+              return (
+                <div key={log.id} style={{ display: 'grid', gridTemplateColumns: '180px minmax(0, 1fr) 120px', gap: '1rem', alignItems: 'center', padding: '0.95rem', borderRadius: '12px', border: '1px solid #fee2e2', background: '#fffafa' }}>
+                  <div>
+                    <div style={{ color: '#111827', fontWeight: 900 }}>{formatDateTime(log.createdAt)}</div>
+                    <div style={{ color: '#94a3b8', fontSize: '0.74rem', fontWeight: 800, marginTop: '0.2rem' }}>{log.ip || '-'}</div>
+                  </div>
+                  <div style={{ minWidth: 0 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.45rem', flexWrap: 'wrap', marginBottom: '0.35rem' }}>
+                      <span style={{ padding: '0.2rem 0.55rem', borderRadius: '999px', fontSize: '0.72rem', fontWeight: 900, background: '#fee2e2', color: '#b91c1c', border: '1px solid #fecaca' }}>{categoryLabel(key)}</span>
+                      <span style={{ color: '#64748b', fontSize: '0.78rem', fontWeight: 800 }}>{log.metadata?.source || 'backend'}</span>
+                    </div>
+                    <div style={{ color: '#111827', fontSize: '0.9rem', fontWeight: 900, overflowWrap: 'anywhere' }}>{log.metadata?.message || describeAuditAction(log.action)}</div>
+                    <div style={{ color: '#94a3b8', fontSize: '0.78rem', marginTop: '0.25rem', overflowWrap: 'anywhere' }}>
+                      Resource/session: {log.resource || '-'}
+                    </div>
+                  </div>
+                  <StatusBadge status="failed" />
+                </div>
+              );
+            })}
+          </div>
+          <AdminPagination
+            page={page}
+            totalPages={totalPages}
+            pageSize={pageSize}
+            total={filteredLogs.length}
+            onPageChange={setPage}
+            onPageSizeChange={(size) => {
+              setPageSize(size);
+              setPage(1);
+            }}
+          />
+        </>
+      )}
+    </div>
+  );
+}
+
+function ReportExportTab({ adminToken, adminUser }) {
+  const [exportingKey, setExportingKey] = useState('');
+  const [message, setMessage] = useState('');
+  const [error, setError] = useState('');
+
+  const reports = [
+    {
+      key: 'sessions',
+      title: 'Customer Gallery / Session Logs',
+      description: 'Semua sesi customer, link gallery, media final, GIF, dan jumlah original snaps.',
+      endpoint: '/api/admin/sessions',
+      filename: `urbanmenphoto_sessions_${reportDateStamp()}.csv`,
+      columns: SESSION_EXPORT_COLUMNS,
+    },
+    {
+      key: 'transactions',
+      title: 'Transactions',
+      description: 'Rekap transaksi dari data payment utama.',
+      endpoint: '/api/admin/transactions',
+      filename: `urbanmenphoto_transactions_${reportDateStamp()}.csv`,
+      columns: TRANSACTION_EXPORT_COLUMNS,
+    },
+    {
+      key: 'payment_logs',
+      title: 'Payment Logs',
+      description: 'Riwayat event payment, perubahan status, IP, dan provider reference.',
+      endpoint: '/api/admin/payment-logs',
+      filename: `urbanmenphoto_payment_logs_${reportDateStamp()}.csv`,
+      columns: PAYMENT_LOG_EXPORT_COLUMNS,
+    },
+    {
+      key: 'messages',
+      title: 'Delivery Messages',
+      description: 'Log pengiriman link gallery via WhatsApp/email.',
+      endpoint: '/api/admin/messages',
+      filename: `urbanmenphoto_messages_${reportDateStamp()}.csv`,
+      columns: MESSAGE_EXPORT_COLUMNS,
+    },
+    {
+      key: 'audit',
+      title: 'Audit Activity',
+      description: 'Jejak aksi admin, customer session, dan webhook backend.',
+      endpoint: '/api/admin/audit-logs',
+      filename: `urbanmenphoto_audit_logs_${reportDateStamp()}.csv`,
+      columns: AUDIT_EXPORT_COLUMNS,
+      ownerOnly: true,
+    },
+  ].filter(report => !report.ownerOnly || adminUser?.role === 'owner');
+
+  const exportReport = async (report) => {
+    setExportingKey(report.key);
+    setMessage('');
+    setError('');
+    try {
+      const rows = await fetchAllAdminRows(report.endpoint, adminToken);
+      if (!rows.length) {
+        setMessage(`${report.title}: tidak ada data untuk diekspor.`);
+        return;
+      }
+      downloadCSV(report.filename, rows, report.columns);
+      setMessage(`${report.title}: ${rows.length} data berhasil diekspor.`);
+    } catch (err) {
+      setError(`${report.title}: ${err.message || 'Export gagal.'}`);
+    } finally {
+      setExportingKey('');
+    }
+  };
+
+  const exportEventBundle = async () => {
+    setExportingKey('bundle');
+    setMessage('');
+    setError('');
+    try {
+      const sessionRows = await fetchAllAdminRows('/api/admin/sessions', adminToken);
+      const transactionRows = await fetchAllAdminRows('/api/admin/transactions', adminToken);
+      const paymentLogRows = await fetchAllAdminRows('/api/admin/payment-logs', adminToken);
+      downloadCSV(`urbanmenphoto_sessions_${reportDateStamp()}.csv`, sessionRows, SESSION_EXPORT_COLUMNS);
+      downloadCSV(`urbanmenphoto_transactions_${reportDateStamp()}.csv`, transactionRows, TRANSACTION_EXPORT_COLUMNS);
+      downloadCSV(`urbanmenphoto_payment_logs_${reportDateStamp()}.csv`, paymentLogRows, PAYMENT_LOG_EXPORT_COLUMNS);
+      setMessage(`Bundle rekap event berhasil diekspor: ${sessionRows.length} sessions, ${transactionRows.length} transactions, ${paymentLogRows.length} payment logs.`);
+    } catch (err) {
+      setError(err.message || 'Export bundle gagal.');
+    } finally {
+      setExportingKey('');
+    }
+  };
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
+      <div style={{ background: 'white', padding: '2rem', borderRadius: '12px', border: '1px solid #e9ecef', boxShadow: '0 2px 8px rgba(0,0,0,0.02)' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', gap: '1rem', alignItems: 'flex-start', marginBottom: '1.5rem', flexWrap: 'wrap' }}>
+          <div>
+            <h2 style={{ margin: 0, color: '#111' }}>Export Report</h2>
+            <p style={{ margin: '0.25rem 0 0', color: '#6c757d', fontSize: '0.9rem' }}>Download CSV untuk rekap event, transaksi, gallery, dan audit.</p>
+          </div>
+          <button
+            type="button"
+            onClick={exportEventBundle}
+            disabled={Boolean(exportingKey)}
+            style={{ padding: '0.75rem 1.1rem', background: '#111827', color: 'white', border: 'none', borderRadius: '8px', cursor: exportingKey ? 'wait' : 'pointer', fontWeight: 'bold' }}
+          >
+            {exportingKey === 'bundle' ? 'Exporting...' : 'Export Bundle Event'}
+          </button>
+        </div>
+
+        {message && <div style={{ marginBottom: '1rem', padding: '0.85rem 1rem', borderRadius: '10px', background: '#dcfce7', color: '#166534', fontWeight: 800 }}>{message}</div>}
+        {error && <div style={{ marginBottom: '1rem', padding: '0.85rem 1rem', borderRadius: '10px', background: '#fee2e2', color: '#b91c1c', fontWeight: 800 }}>{error}</div>}
+
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: '1rem' }}>
+          {reports.map(report => (
+            <div key={report.key} style={{ border: '1px solid #e5e7eb', borderRadius: '12px', padding: '1.1rem', background: '#fff' }}>
+              <div style={{ minHeight: '90px' }}>
+                <h3 style={{ margin: '0 0 0.45rem', color: '#111827', fontSize: '1rem' }}>{report.title}</h3>
+                <p style={{ margin: 0, color: '#64748b', fontSize: '0.85rem', lineHeight: 1.45 }}>{report.description}</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => exportReport(report)}
+                disabled={Boolean(exportingKey)}
+                style={{ width: '100%', marginTop: '1rem', padding: '0.75rem 1rem', borderRadius: '8px', border: 'none', background: '#f97316', color: 'white', cursor: exportingKey ? 'wait' : 'pointer', fontWeight: 900 }}
+              >
+                {exportingKey === report.key ? 'Exporting...' : 'Download CSV'}
+              </button>
+            </div>
+          ))}
+        </div>
+
+        {adminUser?.role !== 'owner' && (
+          <div style={{ marginTop: '1.2rem', padding: '0.9rem 1rem', borderRadius: '10px', background: '#f8fafc', border: '1px solid #e5e7eb', color: '#64748b', fontSize: '0.85rem', lineHeight: 1.5 }}>
+            Staff bisa export rekap operasional. Audit activity penuh, payment key, storage, dan admin users tetap khusus owner.
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+const describeAuditAction = (action = '') => {
+  const parts = String(action || '').split('.');
+  const area = parts[0] || 'system';
+  const subject = parts.slice(1, -1).join(' ') || parts[1] || 'activity';
+  const verb = parts[parts.length - 1] || 'event';
+  const verbMap = {
+    create: 'membuat',
+    update: 'mengubah',
+    delete: 'menghapus',
+    login: 'login',
+    logout: 'logout',
+    failed: 'gagal',
+    success: 'berhasil',
+    finalize: 'menyimpan hasil',
+    cleanup: 'cleanup',
+  };
+  return `${area} ${verbMap[verb] || verb} ${subject}`.replace(/\s+/g, ' ').trim();
+};
+
+const auditAreaStyle = (action = '') => {
+  const area = String(action).split('.')[0];
+  if (area === 'admin') return { background: '#eff6ff', color: '#1d4ed8', border: '1px solid #bfdbfe' };
+  if (area === 'customer') return { background: '#f0fdf4', color: '#166534', border: '1px solid #bbf7d0' };
+  if (area === 'webhook' || area === 'payment') return { background: '#fff7ed', color: '#c2410c', border: '1px solid #fed7aa' };
+  return { background: '#f3f4f6', color: '#374151', border: '1px solid #e5e7eb' };
+};
+
+const formatAuditMetadataValue = (value) => {
+  if (value == null || value === '') return '-';
+  if (typeof value === 'boolean') return value ? 'Yes' : 'No';
+  if (typeof value === 'object') {
+    if ('url' in value && value.url) return value.url;
+    return JSON.stringify(value);
+  }
+  return String(value);
+};
+
+function AuditMetadataDetails({ metadata }) {
+  if (!metadata || typeof metadata !== 'object' || Object.keys(metadata).length === 0) {
+    return (
+      <div style={{ padding: '0.8rem', borderRadius: '10px', background: '#f8fafc', color: '#64748b', fontSize: '0.78rem', lineHeight: 1.45 }}>
+        Belum ada metadata detail untuk audit ini.
+      </div>
+    );
+  }
+
+  const before = metadata.before && typeof metadata.before === 'object' ? metadata.before : null;
+  const after = metadata.after && typeof metadata.after === 'object' ? metadata.after : null;
+  const beforeAfterKeys = before || after
+    ? Array.from(new Set([...Object.keys(before || {}), ...Object.keys(after || {})]))
+    : [];
+  const groupedEntries = Object.entries(metadata).filter(([key]) => key !== 'before' && key !== 'after');
+
+  return (
+    <div style={{ display: 'grid', gap: '0.75rem' }}>
+      {beforeAfterKeys.length > 0 && (
+        <div style={{ border: '1px solid #e5e7eb', borderRadius: '10px', overflow: 'hidden' }}>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', background: '#f8fafc', color: '#64748b', fontSize: '0.72rem', fontWeight: 900, textTransform: 'uppercase' }}>
+            <div style={{ padding: '0.55rem' }}>Field</div>
+            <div style={{ padding: '0.55rem' }}>Before</div>
+            <div style={{ padding: '0.55rem' }}>After</div>
+          </div>
+          {beforeAfterKeys.map((key) => {
+            const beforeValue = formatAuditMetadataValue(before?.[key]);
+            const afterValue = formatAuditMetadataValue(after?.[key]);
+            const changed = beforeValue !== afterValue;
+            return (
+              <div key={key} style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', borderTop: '1px solid #f1f5f9', background: changed ? '#fff7ed' : 'white', fontSize: '0.75rem' }}>
+                <div style={{ padding: '0.55rem', color: '#475569', fontWeight: 900 }}>{key}</div>
+                <div style={{ padding: '0.55rem', color: '#64748b', overflowWrap: 'anywhere' }}>{beforeValue}</div>
+                <div style={{ padding: '0.55rem', color: changed ? '#c2410c' : '#64748b', fontWeight: changed ? 900 : 700, overflowWrap: 'anywhere' }}>{afterValue}</div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {groupedEntries.map(([groupKey, groupValue]) => (
+        <div key={groupKey} style={{ border: '1px solid #e5e7eb', borderRadius: '10px', padding: '0.75rem', background: '#fff' }}>
+          <div style={{ color: '#64748b', fontSize: '0.72rem', fontWeight: 900, textTransform: 'uppercase', marginBottom: '0.45rem' }}>{groupKey}</div>
+          {groupValue && typeof groupValue === 'object' && !Array.isArray(groupValue) ? (
+            <div style={{ display: 'grid', gap: '0.35rem' }}>
+              {Object.entries(groupValue).map(([key, value]) => (
+                <div key={key} style={{ display: 'grid', gridTemplateColumns: '110px minmax(0, 1fr)', gap: '0.5rem', fontSize: '0.76rem' }}>
+                  <div style={{ color: '#94a3b8', fontWeight: 900 }}>{key}</div>
+                  <div style={{ color: '#111827', fontWeight: 750, overflowWrap: 'anywhere' }}>{formatAuditMetadataValue(value)}</div>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div style={{ color: '#111827', fontWeight: 800, fontSize: '0.78rem', overflowWrap: 'anywhere' }}>{formatAuditMetadataValue(groupValue)}</div>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function AuditActivityTab({ adminToken }) {
+  const [logs, setLogs] = useState([]);
+  const [adminUsers, setAdminUsers] = useState([]);
+  const [filters, setFilters] = useState({
+    dateFrom: '',
+    dateTo: '',
+    actor: '',
+    action: '',
+    success: '',
+    query: '',
+  });
+  const [selectedLog, setSelectedLog] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const [error, setError] = useState('');
+  const [auditPage, setAuditPage] = useState(1);
+  const [auditPageSize, setAuditPageSize] = useState(10);
+
+  const actorMap = adminUsers.reduce((acc, user) => {
+    acc[user.id] = user;
+    return acc;
+  }, {});
+
+  const loadAuditLogs = async () => {
+    if (!adminToken) return;
+    setLoading(true);
+    setError('');
+    try {
+      const rows = await fetchAllAdminRows('/api/admin/audit-logs', adminToken);
+      setLogs(rows);
+      try {
+        const users = await backendRequest('/api/admin/users', adminToken);
+        setAdminUsers(Array.isArray(users) ? users : []);
+      } catch {
+        setAdminUsers([]);
+      }
+    } catch (err) {
+      setError(err.message || 'Gagal memuat audit logs.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    loadAuditLogs();
+  }, [adminToken]);
+
+  const actionOptions = Array.from(new Set(logs.map(log => log.action).filter(Boolean))).sort();
+  const actorOptions = Array.from(new Set(logs.map(log => log.actorId || 'system').filter(Boolean)));
+
+  const filteredLogs = logs.filter((log) => {
+    const createdDate = log.createdAt ? new Date(log.createdAt) : null;
+    if (filters.dateFrom && createdDate && createdDate < new Date(`${filters.dateFrom}T00:00:00`)) return false;
+    if (filters.dateTo && createdDate && createdDate > new Date(`${filters.dateTo}T23:59:59`)) return false;
+    if (filters.actor) {
+      const actorValue = log.actorId || 'system';
+      if (actorValue !== filters.actor) return false;
+    }
+    if (filters.action && log.action !== filters.action) return false;
+    if (filters.success && String(Boolean(log.success)) !== filters.success) return false;
+    if (filters.query.trim()) {
+      const haystack = [
+        log.id,
+        log.actorId,
+        actorMap[log.actorId]?.email,
+        actorMap[log.actorId]?.role,
+        log.action,
+        log.resource,
+        log.ip,
+        log.userAgent,
+        log.metadata ? JSON.stringify(log.metadata) : '',
+      ].filter(Boolean).join(' ').toLowerCase();
+      if (!haystack.includes(filters.query.trim().toLowerCase())) return false;
+    }
+    return true;
+  });
+
+  const totals = filteredLogs.reduce((acc, log) => {
+    acc.total += 1;
+    if (log.success) acc.success += 1;
+    else acc.failed += 1;
+    const area = String(log.action || 'system').split('.')[0] || 'system';
+    acc.areas[area] = (acc.areas[area] || 0) + 1;
+    return acc;
+  }, { total: 0, success: 0, failed: 0, areas: {} });
+  const auditTotalPages = Math.max(1, Math.ceil(filteredLogs.length / auditPageSize));
+  const auditStartIndex = (auditPage - 1) * auditPageSize;
+  const paginatedLogs = filteredLogs.slice(auditStartIndex, auditStartIndex + auditPageSize);
+
+  useEffect(() => {
+    if (auditPage > auditTotalPages) {
+      setAuditPage(auditTotalPages);
+    }
+  }, [auditPage, auditTotalPages]);
+
+  const handleFilterChange = (key, value) => {
+    setFilters(prev => ({ ...prev, [key]: value }));
+    setAuditPage(1);
+  };
+
+  const resetFilters = () => {
+    setFilters({ dateFrom: '', dateTo: '', actor: '', action: '', success: '', query: '' });
+    setAuditPage(1);
+  };
+
+  const exportFiltered = async () => {
+    setExporting(true);
+    setError('');
+    try {
+      if (!filteredLogs.length) {
+        setError('Tidak ada audit log untuk diekspor.');
+        return;
+      }
+      downloadCSV(`urbanmenphoto_audit_filtered_${reportDateStamp()}.csv`, filteredLogs, [
+        ...AUDIT_EXPORT_COLUMNS,
+        { key: 'actorEmail', label: 'Actor Email', value: row => actorMap[row.actorId]?.email || (row.actorId ? row.actorId : 'system/customer') },
+        { key: 'actorRole', label: 'Actor Role', value: row => actorMap[row.actorId]?.role || (row.actorId ? '-' : 'system/customer') },
+        { key: 'description', label: 'Readable Detail', value: row => describeAuditAction(row.action) },
+      ]);
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  const selectedActor = selectedLog ? actorMap[selectedLog.actorId] : null;
+  const auditPaginationControls = filteredLogs.length > 0 && (
+    <AdminPagination
+      page={auditPage}
+      totalPages={auditTotalPages}
+      pageSize={auditPageSize}
+      total={filteredLogs.length}
+      onPageChange={setAuditPage}
+      onPageSizeChange={(size) => {
+        setAuditPageSize(size);
+        setAuditPage(1);
+      }}
+    />
+  );
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
+      <div style={{ background: 'white', padding: '2rem', borderRadius: '12px', border: '1px solid #e9ecef', boxShadow: '0 2px 8px rgba(0,0,0,0.02)' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', gap: '1rem', alignItems: 'flex-start', marginBottom: '1.25rem', flexWrap: 'wrap' }}>
+          <div>
+            <h2 style={{ margin: 0, color: '#111' }}>Audit Activity</h2>
+            <p style={{ margin: '0.25rem 0 0', color: '#6c757d', fontSize: '0.9rem' }}>Filter jejak aktivitas admin/operator, customer, dan backend event.</p>
+          </div>
+          <div style={{ display: 'flex', gap: '0.6rem', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+            <button onClick={loadAuditLogs} disabled={loading} style={{ padding: '0.65rem 1rem', background: '#f8f9fa', color: '#111827', border: '1px solid #e5e7eb', borderRadius: '8px', cursor: loading ? 'wait' : 'pointer', fontWeight: 'bold' }}>
+              {loading ? 'Loading...' : 'Refresh'}
+            </button>
+            <button onClick={exportFiltered} disabled={exporting || loading} style={{ padding: '0.65rem 1rem', background: '#111827', color: 'white', border: 'none', borderRadius: '8px', cursor: exporting ? 'wait' : 'pointer', fontWeight: 'bold' }}>
+              {exporting ? 'Exporting...' : 'Export Filtered CSV'}
+            </button>
+          </div>
+        </div>
+
+        {error && <div style={{ marginBottom: '1rem', padding: '0.85rem 1rem', borderRadius: '10px', background: '#fee2e2', color: '#b91c1c', fontWeight: 800 }}>{error}</div>}
+
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: '0.8rem', marginBottom: '1rem' }}>
+          <div style={{ padding: '1rem', borderRadius: '10px', background: '#f8fafc', border: '1px solid #e5e7eb' }}>
+            <div style={{ color: '#64748b', fontSize: '0.78rem', fontWeight: 900 }}>Total Filtered</div>
+            <div style={{ fontSize: '1.7rem', fontWeight: 900 }}>{totals.total}</div>
+          </div>
+          <div style={{ padding: '1rem', borderRadius: '10px', background: '#f0fdf4', border: '1px solid #bbf7d0' }}>
+            <div style={{ color: '#166534', fontSize: '0.78rem', fontWeight: 900 }}>Success</div>
+            <div style={{ fontSize: '1.7rem', fontWeight: 900 }}>{totals.success}</div>
+          </div>
+          <div style={{ padding: '1rem', borderRadius: '10px', background: '#fef2f2', border: '1px solid #fecaca' }}>
+            <div style={{ color: '#991b1b', fontSize: '0.78rem', fontWeight: 900 }}>Failed</div>
+            <div style={{ fontSize: '1.7rem', fontWeight: 900 }}>{totals.failed}</div>
+          </div>
+        </div>
+
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))', gap: '0.75rem', padding: '1rem', borderRadius: '12px', background: '#f8fafc', border: '1px solid #e5e7eb', marginBottom: '1rem' }}>
+          <input type="date" value={filters.dateFrom} onChange={event => handleFilterChange('dateFrom', event.target.value)} style={{ padding: '0.7rem 0.8rem', border: '1px solid #d1d5db', borderRadius: '8px' }} />
+          <input type="date" value={filters.dateTo} onChange={event => handleFilterChange('dateTo', event.target.value)} style={{ padding: '0.7rem 0.8rem', border: '1px solid #d1d5db', borderRadius: '8px' }} />
+          <select value={filters.actor} onChange={event => handleFilterChange('actor', event.target.value)} style={{ padding: '0.7rem 0.8rem', border: '1px solid #d1d5db', borderRadius: '8px', background: 'white' }}>
+            <option value="">Semua admin/operator</option>
+            {actorOptions.map(actorId => {
+              const user = actorMap[actorId];
+              return <option key={actorId} value={actorId}>{actorId === 'system' ? 'System / customer' : `${user?.email || actorId} (${user?.role || 'admin'})`}</option>;
+            })}
+          </select>
+          <select value={filters.action} onChange={event => handleFilterChange('action', event.target.value)} style={{ padding: '0.7rem 0.8rem', border: '1px solid #d1d5db', borderRadius: '8px', background: 'white' }}>
+            <option value="">Semua event/action</option>
+            {actionOptions.map(action => <option key={action} value={action}>{action}</option>)}
+          </select>
+          <select value={filters.success} onChange={event => handleFilterChange('success', event.target.value)} style={{ padding: '0.7rem 0.8rem', border: '1px solid #d1d5db', borderRadius: '8px', background: 'white' }}>
+            <option value="">Semua status</option>
+            <option value="true">Success</option>
+            <option value="false">Failed</option>
+          </select>
+          <input value={filters.query} onChange={event => handleFilterChange('query', event.target.value)} placeholder="Cari resource, IP, email..." style={{ padding: '0.7rem 0.8rem', border: '1px solid #d1d5db', borderRadius: '8px' }} />
+          <button type="button" onClick={resetFilters} style={{ padding: '0.7rem 0.8rem', border: '1px solid #d1d5db', borderRadius: '8px', background: 'white', color: '#111827', cursor: 'pointer', fontWeight: 900 }}>
+            Reset Filter
+          </button>
+        </div>
+
+        {loading ? (
+          <div style={{ textAlign: 'center', padding: '4rem 2rem', border: '1px dashed #ced4da', borderRadius: '8px', color: '#6c757d' }}>Memuat audit logs...</div>
+        ) : filteredLogs.length === 0 ? (
+          <div style={{ textAlign: 'center', padding: '4rem 2rem', border: '1px dashed #ced4da', borderRadius: '8px', color: '#6c757d' }}>Tidak ada audit log yang cocok dengan filter.</div>
+        ) : (
+          <>
+            <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 360px', gap: '1rem', alignItems: 'start' }}>
+              <div style={{ display: 'grid', gap: '0.65rem' }}>
+                {paginatedLogs.map(log => {
+                  const actor = actorMap[log.actorId];
+                  const isSelected = selectedLog?.id === log.id;
+                  return (
+                    <button
+                      key={log.id}
+                      type="button"
+                      onClick={() => setSelectedLog(log)}
+                      style={{ width: '100%', textAlign: 'left', display: 'grid', gridTemplateColumns: '150px minmax(0, 1fr) 96px', gap: '1rem', alignItems: 'center', padding: '0.95rem', borderRadius: '12px', border: isSelected ? '2px solid #f97316' : '1px solid #e5e7eb', background: isSelected ? '#fff7ed' : 'white', cursor: 'pointer' }}
+                    >
+                      <div>
+                        <div style={{ color: '#111827', fontWeight: 900 }}>{formatDateTime(log.createdAt)}</div>
+                        <div style={{ color: '#94a3b8', fontSize: '0.74rem', fontWeight: 800, marginTop: '0.2rem' }}>{log.ip || '-'}</div>
+                      </div>
+                      <div style={{ minWidth: 0 }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.45rem', flexWrap: 'wrap', marginBottom: '0.35rem' }}>
+                          <span style={{ padding: '0.2rem 0.5rem', borderRadius: '999px', fontSize: '0.72rem', fontWeight: 900, ...auditAreaStyle(log.action) }}>{String(log.action || 'system').split('.')[0]}</span>
+                          <span style={{ color: '#111827', fontWeight: 900 }}>{log.action}</span>
+                        </div>
+                        <div style={{ color: '#475569', fontSize: '0.86rem', fontWeight: 700, overflowWrap: 'anywhere' }}>{describeAuditAction(log.action)}</div>
+                        <div style={{ color: '#94a3b8', fontSize: '0.78rem', marginTop: '0.25rem', overflowWrap: 'anywhere' }}>
+                          {actor?.email || log.actorId || 'System / customer'} · {log.resource || '-'}
+                        </div>
+                      </div>
+                      <StatusBadge status={log.success ? 'success' : 'failed'} />
+                    </button>
+                  );
+                })}
+              </div>
+
+              <aside style={{ position: 'sticky', top: 0, border: '1px solid #e5e7eb', borderRadius: '12px', background: '#fff', padding: '1rem' }}>
+                {!selectedLog ? (
+                  <div style={{ color: '#64748b', textAlign: 'center', padding: '2rem 1rem', fontWeight: 800 }}>Pilih audit log untuk melihat detail.</div>
+                ) : (
+                  <div style={{ display: 'grid', gap: '0.85rem' }}>
+                    <div>
+                      <div style={{ fontSize: '0.78rem', color: '#64748b', fontWeight: 900, textTransform: 'uppercase' }}>Detail Perubahan</div>
+                      <h3 style={{ margin: '0.3rem 0 0', color: '#111827', lineHeight: 1.25 }}>{describeAuditAction(selectedLog.action)}</h3>
+                    </div>
+                    {[
+                      ['Event / Action', selectedLog.action],
+                      ['Status', selectedLog.success ? 'Success' : 'Failed'],
+                      ['Actor', selectedActor?.email || selectedLog.actorId || 'System / customer'],
+                      ['Role', selectedActor?.role || (selectedLog.actorId ? '-' : 'system/customer')],
+                      ['Resource', selectedLog.resource || '-'],
+                      ['IP Address', selectedLog.ip || '-'],
+                      ['Waktu', formatDateTime(selectedLog.createdAt)],
+                      ['Audit ID', selectedLog.id],
+                    ].map(([label, value]) => (
+                      <div key={label} style={{ borderTop: '1px solid #f1f5f9', paddingTop: '0.65rem' }}>
+                        <div style={{ color: '#94a3b8', fontSize: '0.74rem', fontWeight: 900, textTransform: 'uppercase', marginBottom: '0.25rem' }}>{label}</div>
+                        <div style={{ color: '#111827', fontWeight: 800, overflowWrap: 'anywhere' }}>{value}</div>
+                      </div>
+                    ))}
+                    <div style={{ borderTop: '1px solid #f1f5f9', paddingTop: '0.65rem' }}>
+                      <div style={{ color: '#94a3b8', fontSize: '0.74rem', fontWeight: 900, textTransform: 'uppercase', marginBottom: '0.25rem' }}>User Agent</div>
+                      <div style={{ color: '#475569', fontSize: '0.78rem', lineHeight: 1.45, overflowWrap: 'anywhere' }}>{selectedLog.userAgent || '-'}</div>
+                    </div>
+                    <div style={{ borderTop: '1px solid #f1f5f9', paddingTop: '0.65rem' }}>
+                      <div style={{ color: '#94a3b8', fontSize: '0.74rem', fontWeight: 900, textTransform: 'uppercase', marginBottom: '0.5rem' }}>Metadata / Field Changes</div>
+                      <AuditMetadataDetails metadata={selectedLog.metadata} />
+                    </div>
+                  </div>
+                )}
+              </aside>
+            </div>
+            {auditPaginationControls}
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function BackendListTab({ title, description, endpoint, adminToken, columns }) {
+  const [rows, setRows] = useState([]);
+  const [pagination, setPagination] = useState({ total: 0, page: 1, pageSize: 25, totalPages: 0 });
+  const [query, setQuery] = useState('');
+  const [filterValue, setFilterValue] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const [error, setError] = useState('');
+  const filterKey = endpoint.includes('payments')
+    ? 'status'
+    : endpoint.includes('messages')
+      ? 'channel'
+      : endpoint.includes('audit-logs')
+        ? 'action'
+        : 'status';
+
+  const loadRows = async (nextPage = pagination.page) => {
+    if (!adminToken) return;
+    setLoading(true);
+    setError('');
+    try {
+      const params = new URLSearchParams({
+        page: String(nextPage),
+        pageSize: String(pagination.pageSize),
+      });
+      if (query.trim()) params.set('q', query.trim());
+      if (filterValue.trim()) params.set(filterKey, filterValue.trim());
+      const data = await backendRequest(`${endpoint}?${params.toString()}`, adminToken);
+      if (Array.isArray(data)) {
+        setRows(data);
+        setPagination(prev => ({ ...prev, total: data.length, page: 1, totalPages: 1 }));
+      } else {
+        setRows(Array.isArray(data?.items) ? data.items : []);
+        setPagination({
+          total: Number(data?.total || 0),
+          page: Number(data?.page || nextPage),
+          pageSize: Number(data?.pageSize || pagination.pageSize),
+          totalPages: Number(data?.totalPages || 0),
+        });
+      }
     } catch (err) {
       setError(err.message);
     } finally {
@@ -1374,8 +3675,41 @@ function BackendListTab({ title, description, endpoint, adminToken, columns }) {
   };
 
   useEffect(() => {
-    loadRows();
-  }, [endpoint, adminToken]);
+    loadRows(1);
+  }, [endpoint, adminToken, pagination.pageSize]);
+
+  const exportCurrentList = async () => {
+    if (!adminToken) return;
+    setExporting(true);
+    setError('');
+    try {
+      const params = {};
+      if (query.trim()) params.q = query.trim();
+      if (filterValue.trim()) params[filterKey] = filterValue.trim();
+      const exportRows = await fetchAllAdminRows(endpoint, adminToken, params);
+      if (!exportRows.length) {
+        setError('Tidak ada data untuk diekspor.');
+        return;
+      }
+      const exportColumns = columns.map(column => ({
+        key: column.key,
+        label: column.label,
+        value: (row) => {
+          const value = row[column.key];
+          if (column.key === 'amount') return value;
+          if (String(column.key).toLowerCase().includes('at')) return formatDateTime(value);
+          if (typeof value === 'boolean') return value ? 'yes' : 'no';
+          return value;
+        },
+      }));
+      const name = title.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '');
+      downloadCSV(`urbanmenphoto_${name || 'report'}_${reportDateStamp()}.csv`, exportRows, exportColumns);
+    } catch (err) {
+      setError(err.message || 'Export gagal.');
+    } finally {
+      setExporting(false);
+    }
+  };
 
   return (
     <div style={{ background: 'white', padding: '2rem', borderRadius: '12px', border: '1px solid #e9ecef', boxShadow: '0 2px 8px rgba(0,0,0,0.02)' }}>
@@ -1384,9 +3718,31 @@ function BackendListTab({ title, description, endpoint, adminToken, columns }) {
           <h2 style={{ margin: 0, color: '#111' }}>{title}</h2>
           {description && <p style={{ margin: '0.25rem 0 0', color: '#6c757d', fontSize: '0.9rem' }}>{description}</p>}
         </div>
-        <button onClick={loadRows} style={{ padding: '0.6rem 1rem', background: '#f8f9fa', color: '#111', border: '1px solid #e9ecef', borderRadius: '6px', cursor: 'pointer', fontWeight: 'bold' }}>
-          Refresh
-        </button>
+        <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+          <input
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            onKeyDown={(event) => { if (event.key === 'Enter') loadRows(1); }}
+            placeholder="Search..."
+            style={{ padding: '0.6rem 0.8rem', border: '1px solid #e9ecef', borderRadius: '6px', minWidth: '180px' }}
+          />
+          <input
+            value={filterValue}
+            onChange={(event) => setFilterValue(event.target.value)}
+            onKeyDown={(event) => { if (event.key === 'Enter') loadRows(1); }}
+            placeholder={`Filter ${filterKey}`}
+            style={{ padding: '0.6rem 0.8rem', border: '1px solid #e9ecef', borderRadius: '6px', width: '130px' }}
+          />
+          <button onClick={() => loadRows(1)} style={{ padding: '0.6rem 1rem', background: '#f97316', color: 'white', border: 'none', borderRadius: '6px', cursor: 'pointer', fontWeight: 'bold' }}>
+            Apply
+          </button>
+          <button onClick={() => loadRows(pagination.page)} style={{ padding: '0.6rem 1rem', background: '#f8f9fa', color: '#111', border: '1px solid #e9ecef', borderRadius: '6px', cursor: 'pointer', fontWeight: 'bold' }}>
+            Refresh
+          </button>
+          <button onClick={exportCurrentList} disabled={exporting} style={{ padding: '0.6rem 1rem', background: '#111827', color: 'white', border: 'none', borderRadius: '6px', cursor: exporting ? 'wait' : 'pointer', fontWeight: 'bold' }}>
+            {exporting ? 'Exporting...' : 'Export CSV'}
+          </button>
+        </div>
       </div>
 
       {error && <div style={{ marginBottom: '1rem', padding: '0.8rem 1rem', borderRadius: '8px', background: '#fee2e2', color: '#b91c1c', fontWeight: 'bold' }}>{error}</div>}
@@ -1415,8 +3771,428 @@ function BackendListTab({ title, description, endpoint, adminToken, columns }) {
               ))}
             </tbody>
           </table>
+          <AdminPagination
+            page={pagination.page}
+            totalPages={pagination.totalPages}
+            pageSize={pagination.pageSize}
+            total={pagination.total}
+            onPageChange={loadRows}
+            onPageSizeChange={(size) => setPagination(prev => ({ ...prev, pageSize: size, page: 1 }))}
+          />
         </div>
       )}
+    </div>
+  );
+}
+
+function AdminSessionDetailModal({ detail, loading, error, onClose }) {
+  const session = detail?.session || {};
+  const images = [
+    session.animatedImage?.url,
+    session.finalImage?.url,
+    session.printImage?.url,
+    ...(session.images || []),
+  ].filter(Boolean);
+  const payments = detail?.payments || [];
+  const messages = detail?.messages || [];
+  const auditLogs = detail?.auditLogs || [];
+
+  return (
+    <div role="dialog" aria-modal="true" style={{ position: 'fixed', inset: 0, zIndex: 1200, background: 'rgba(17, 24, 39, 0.58)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '1.5rem' }}>
+      <div style={{ width: 'min(1100px, 100%)', maxHeight: '88vh', overflowY: 'auto', background: 'white', borderRadius: '14px', border: '1px solid #e5e7eb', boxShadow: '0 24px 70px rgba(0,0,0,0.25)', padding: '1.5rem' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', gap: '1rem', alignItems: 'flex-start', marginBottom: '1.25rem' }}>
+          <div>
+            <h2 style={{ margin: 0, color: '#111' }}>Session Detail</h2>
+            <p style={{ margin: '0.35rem 0 0', color: '#6c757d', fontFamily: 'monospace', fontSize: '0.9rem' }}>{session.id || '-'}</p>
+          </div>
+          <button onClick={onClose} style={{ padding: '0.55rem 0.85rem', background: '#f8f9fa', border: '1px solid #e9ecef', borderRadius: '8px', cursor: 'pointer', fontWeight: 'bold' }}>Close</button>
+        </div>
+
+        {loading ? (
+          <div style={{ padding: '3rem', textAlign: 'center', color: '#6c757d' }}>Memuat detail...</div>
+        ) : error ? (
+          <div style={{ padding: '1rem', borderRadius: '8px', background: '#fee2e2', color: '#b91c1c', fontWeight: 'bold' }}>{error}</div>
+        ) : (
+          <div style={{ display: 'grid', gap: '1.25rem' }}>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: '0.9rem' }}>
+              {[
+                ['Status', session.status],
+                ['Created', formatDateTime(session.createdAt)],
+                ['Expires', formatDateTime(session.expiresAt)],
+                ['Download', session.downloadUrl],
+              ].map(([label, value]) => (
+                <div key={label} style={{ border: '1px solid #e9ecef', borderRadius: '10px', padding: '0.9rem', background: '#f8f9fa' }}>
+                  <div style={{ color: '#6c757d', fontSize: '0.76rem', fontWeight: '900', textTransform: 'uppercase', marginBottom: '0.35rem' }}>{label}</div>
+                  <div style={{ color: '#111827', fontWeight: '800', overflowWrap: 'anywhere' }}>{value || '-'}</div>
+                </div>
+              ))}
+            </div>
+
+            <section>
+              <h3 style={{ margin: '0 0 0.75rem', color: '#111' }}>Media</h3>
+              {images.length === 0 ? (
+                <div style={{ padding: '1rem', borderRadius: '8px', border: '1px dashed #ced4da', color: '#6c757d' }}>Belum ada media.</div>
+              ) : (
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(150px, 1fr))', gap: '0.75rem' }}>
+                  {images.map((url, index) => (
+                    <a key={`${url}-${index}`} href={url} target="_blank" rel="noreferrer" style={{ display: 'block', border: '1px solid #e9ecef', borderRadius: '10px', overflow: 'hidden', background: '#f8f9fa', textDecoration: 'none' }}>
+                      <img src={url} alt={`Session media ${index + 1}`} style={{ width: '100%', aspectRatio: '4/3', objectFit: 'cover', display: 'block' }} />
+                      <div style={{ padding: '0.5rem', color: '#374151', fontSize: '0.78rem', fontWeight: '800' }}>{url.includes('.gif') ? 'GIF' : `Image ${index + 1}`}</div>
+                    </a>
+                  ))}
+                </div>
+              )}
+            </section>
+
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: '1rem' }}>
+              <DetailList title="Payments" rows={payments} columns={['provider', 'amount', 'status', 'createdAt']} />
+              <DetailList title="Messages" rows={messages} columns={['channel', 'recipient', 'status', 'createdAt']} />
+              <DetailList title="Activity" rows={auditLogs} columns={['action', 'success', 'createdAt']} />
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function DetailList({ title, rows, columns }) {
+  return (
+    <section style={{ border: '1px solid #e9ecef', borderRadius: '10px', padding: '1rem' }}>
+      <h3 style={{ margin: '0 0 0.75rem', color: '#111' }}>{title}</h3>
+      {rows.length === 0 ? (
+        <div style={{ color: '#6c757d', fontSize: '0.9rem' }}>Belum ada data.</div>
+      ) : (
+        <div style={{ display: 'grid', gap: '0.65rem' }}>
+          {rows.map((row, index) => (
+            <div key={row.id || `${title}-${index}`} style={{ borderBottom: index === rows.length - 1 ? 'none' : '1px solid #f1f3f5', paddingBottom: '0.6rem' }}>
+              {columns.map((column) => (
+                <div key={column} style={{ display: 'flex', justifyContent: 'space-between', gap: '1rem', fontSize: '0.84rem', marginBottom: '0.2rem' }}>
+                  <span style={{ color: '#6c757d', fontWeight: '800' }}>{column}</span>
+                  <span style={{ color: '#111827', fontWeight: '700', textAlign: 'right', overflowWrap: 'anywhere' }}>{formatDetailValue(row[column], column)}</span>
+                </div>
+              ))}
+            </div>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function formatDetailValue(value, column) {
+  if (value == null || value === '') return '-';
+  if (column === 'createdAt' || column === 'updatedAt') return formatDateTime(value);
+  if (column === 'amount') return formatCurrency(value);
+  if (typeof value === 'boolean') return value ? 'Yes' : 'No';
+  return String(value);
+}
+
+const emptyVoucherForm = {
+  id: '',
+  code: '',
+  name: '',
+  type: 'fixed',
+  value: '',
+  minAmount: '',
+  maxDiscount: '',
+  usageLimit: '',
+  active: true,
+  startsAt: '',
+  endsAt: '',
+};
+
+const toDateInputValue = (value) => {
+  if (!value) return '';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+  return date.toISOString().slice(0, 10);
+};
+
+const dateInputToISOString = (value, endOfDay = false) => {
+  if (!value) return null;
+  return `${value}T${endOfDay ? '23:59:59' : '00:00:00'}Z`;
+};
+
+const voucherStatus = (voucher) => {
+  const now = Date.now();
+  if (!voucher.active) return 'inactive';
+  if (voucher.startsAt && new Date(voucher.startsAt).getTime() > now) return 'scheduled';
+  if (voucher.endsAt && new Date(voucher.endsAt).getTime() < now) return 'expired';
+  if (Number(voucher.usageLimit || 0) > 0 && Number(voucher.usedCount || 0) >= Number(voucher.usageLimit || 0)) return 'used up';
+  return 'active';
+};
+
+function VoucherSettingsTab({ adminToken }) {
+  const [vouchers, setVouchers] = useState([]);
+  const [form, setForm] = useState(emptyVoucherForm);
+  const [editingId, setEditingId] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState('');
+  const [error, setError] = useState('');
+
+  const loadVouchers = async () => {
+    if (!adminToken) return;
+    setLoading(true);
+    setError('');
+    try {
+      const data = await backendRequest('/api/admin/vouchers', adminToken);
+      setVouchers(Array.isArray(data) ? data : []);
+    } catch (err) {
+      setError(err.message || 'Gagal memuat voucher.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    loadVouchers();
+  }, [adminToken]);
+
+  const resetForm = () => {
+    setForm(emptyVoucherForm);
+    setEditingId('');
+  };
+
+  const editVoucher = (voucher) => {
+    setEditingId(voucher.id);
+    setForm({
+      id: voucher.id || '',
+      code: voucher.code || '',
+      name: voucher.name || '',
+      type: voucher.type || 'fixed',
+      value: String(voucher.value || ''),
+      minAmount: String(voucher.minAmount || ''),
+      maxDiscount: String(voucher.maxDiscount || ''),
+      usageLimit: String(voucher.usageLimit || ''),
+      active: Boolean(voucher.active),
+      startsAt: toDateInputValue(voucher.startsAt),
+      endsAt: toDateInputValue(voucher.endsAt),
+    });
+  };
+
+  const updateForm = (key, value) => {
+    setForm(prev => ({ ...prev, [key]: value }));
+  };
+
+  const saveVoucher = async (event) => {
+    event.preventDefault();
+    if (!adminToken) return;
+    setSaving(true);
+    setError('');
+    setMessage('');
+    try {
+      const payload = {
+        id: form.id || undefined,
+        code: form.code.trim(),
+        name: form.name.trim(),
+        type: form.type,
+        value: Number(form.value || 0),
+        minAmount: Number(form.minAmount || 0),
+        maxDiscount: Number(form.maxDiscount || 0),
+        usageLimit: Number(form.usageLimit || 0),
+        active: Boolean(form.active),
+        startsAt: dateInputToISOString(form.startsAt),
+        endsAt: dateInputToISOString(form.endsAt, true),
+      };
+      const endpoint = editingId ? `/api/admin/vouchers/${editingId}` : '/api/admin/vouchers';
+      const saved = await backendRequest(endpoint, adminToken, {
+        method: editingId ? 'PUT' : 'POST',
+        body: JSON.stringify(payload),
+      });
+      setVouchers(prev => {
+        const exists = prev.some(item => item.id === saved.id);
+        return exists ? prev.map(item => item.id === saved.id ? saved : item) : [saved, ...prev];
+      });
+      setMessage(`Voucher ${saved.code} berhasil disimpan.`);
+      resetForm();
+    } catch (err) {
+      setError(err.message || 'Gagal menyimpan voucher.');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const deleteVoucher = async (voucher) => {
+    if (!window.confirm(`Hapus voucher ${voucher.code}?`)) return;
+    setError('');
+    setMessage('');
+    try {
+      await backendRequest(`/api/admin/vouchers/${voucher.id}`, adminToken, { method: 'DELETE' });
+      setVouchers(prev => prev.filter(item => item.id !== voucher.id));
+      if (editingId === voucher.id) resetForm();
+      setMessage(`Voucher ${voucher.code} berhasil dihapus.`);
+    } catch (err) {
+      setError(err.message || 'Gagal menghapus voucher.');
+    }
+  };
+
+  const toggleVoucher = async (voucher) => {
+    setError('');
+    setMessage('');
+    try {
+      const saved = await backendRequest(`/api/admin/vouchers/${voucher.id}`, adminToken, {
+        method: 'PUT',
+        body: JSON.stringify({
+          ...voucher,
+          active: !voucher.active,
+          startsAt: voucher.startsAt || null,
+          endsAt: voucher.endsAt || null,
+        }),
+      });
+      setVouchers(prev => prev.map(item => item.id === saved.id ? saved : item));
+      setMessage(`Voucher ${saved.code} ${saved.active ? 'diaktifkan' : 'dinonaktifkan'}.`);
+    } catch (err) {
+      setError(err.message || 'Gagal mengubah status voucher.');
+    }
+  };
+
+  const stats = vouchers.reduce((acc, voucher) => {
+    acc.total += 1;
+    if (voucherStatus(voucher) === 'active') acc.active += 1;
+    acc.used += Number(voucher.usedCount || 0);
+    return acc;
+  }, { total: 0, active: 0, used: 0 });
+
+  return (
+    <div style={{ display: 'grid', gridTemplateColumns: 'minmax(360px, 0.85fr) minmax(0, 1.15fr)', gap: '1.25rem', alignItems: 'start' }}>
+      <form onSubmit={saveVoucher} style={{ background: 'white', padding: '2rem', borderRadius: '12px', border: '1px solid #e9ecef', boxShadow: '0 2px 8px rgba(0,0,0,0.02)', display: 'grid', gap: '1rem' }}>
+        <div>
+          <h2 style={{ margin: 0, color: '#111827' }}>Voucher Settings</h2>
+          <p style={{ margin: '0.25rem 0 0', color: '#64748b', fontSize: '0.9rem' }}>{editingId ? 'Edit voucher promo.' : 'Buat voucher promo baru.'}</p>
+        </div>
+
+        {message && <div style={{ padding: '0.85rem 1rem', borderRadius: '10px', background: '#dcfce7', color: '#166534', fontWeight: 800 }}>{message}</div>}
+        {error && <div style={{ padding: '0.85rem 1rem', borderRadius: '10px', background: '#fee2e2', color: '#991b1b', fontWeight: 800 }}>{error}</div>}
+
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.8rem' }}>
+          {[
+            ['Total Voucher', stats.total],
+            ['Aktif', stats.active],
+            ['Terpakai', stats.used],
+            ['Nonaktif', Math.max(0, stats.total - stats.active)],
+          ].map(([label, value]) => (
+            <div key={label} style={{ padding: '0.9rem', borderRadius: '10px', border: '1px solid #e5e7eb', background: '#f8fafc' }}>
+              <div style={{ color: '#64748b', fontSize: '0.74rem', fontWeight: 900 }}>{label}</div>
+              <div style={{ color: '#111827', fontSize: '1.6rem', fontWeight: 950 }}>{value}</div>
+            </div>
+          ))}
+        </div>
+
+        <label style={{ display: 'grid', gap: '0.35rem', color: '#475569', fontWeight: 900 }}>
+          Kode Voucher
+          <input value={form.code} onChange={event => updateForm('code', event.target.value.toUpperCase())} placeholder="EVENT10" required maxLength={32} style={{ padding: '0.85rem 1rem', border: '1px solid #d1d5db', borderRadius: '8px', fontWeight: 900, textTransform: 'uppercase' }} />
+        </label>
+
+        <label style={{ display: 'grid', gap: '0.35rem', color: '#475569', fontWeight: 900 }}>
+          Nama Voucher
+          <input value={form.name} onChange={event => updateForm('name', event.target.value)} placeholder="Diskon Event" style={{ padding: '0.85rem 1rem', border: '1px solid #d1d5db', borderRadius: '8px', fontWeight: 800 }} />
+        </label>
+
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.8rem' }}>
+          <label style={{ display: 'grid', gap: '0.35rem', color: '#475569', fontWeight: 900 }}>
+            Tipe Diskon
+            <select value={form.type} onChange={event => updateForm('type', event.target.value)} style={{ padding: '0.85rem 1rem', border: '1px solid #d1d5db', borderRadius: '8px', background: 'white', fontWeight: 900 }}>
+              <option value="fixed">Nominal Rupiah</option>
+              <option value="percent">Persentase</option>
+            </select>
+          </label>
+          <label style={{ display: 'grid', gap: '0.35rem', color: '#475569', fontWeight: 900 }}>
+            Nilai
+            <input type="number" min="1" value={form.value} onChange={event => updateForm('value', event.target.value)} placeholder={form.type === 'percent' ? '10' : '5000'} required style={{ padding: '0.85rem 1rem', border: '1px solid #d1d5db', borderRadius: '8px', fontWeight: 900 }} />
+          </label>
+        </div>
+
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.8rem' }}>
+          <label style={{ display: 'grid', gap: '0.35rem', color: '#475569', fontWeight: 900 }}>
+            Minimum Belanja
+            <input type="number" min="0" value={form.minAmount} onChange={event => updateForm('minAmount', event.target.value)} placeholder="0" style={{ padding: '0.85rem 1rem', border: '1px solid #d1d5db', borderRadius: '8px', fontWeight: 900 }} />
+          </label>
+          <label style={{ display: 'grid', gap: '0.35rem', color: '#475569', fontWeight: 900 }}>
+            Maks Diskon
+            <input type="number" min="0" value={form.maxDiscount} onChange={event => updateForm('maxDiscount', event.target.value)} placeholder="0" style={{ padding: '0.85rem 1rem', border: '1px solid #d1d5db', borderRadius: '8px', fontWeight: 900 }} />
+          </label>
+        </div>
+
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.8rem' }}>
+          <label style={{ display: 'grid', gap: '0.35rem', color: '#475569', fontWeight: 900 }}>
+            Mulai
+            <input type="date" value={form.startsAt} onChange={event => updateForm('startsAt', event.target.value)} style={{ padding: '0.85rem 1rem', border: '1px solid #d1d5db', borderRadius: '8px', fontWeight: 900 }} />
+          </label>
+          <label style={{ display: 'grid', gap: '0.35rem', color: '#475569', fontWeight: 900 }}>
+            Berakhir
+            <input type="date" value={form.endsAt} onChange={event => updateForm('endsAt', event.target.value)} style={{ padding: '0.85rem 1rem', border: '1px solid #d1d5db', borderRadius: '8px', fontWeight: 900 }} />
+          </label>
+        </div>
+
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: '0.8rem', alignItems: 'center' }}>
+          <label style={{ display: 'grid', gap: '0.35rem', color: '#475569', fontWeight: 900 }}>
+            Limit Pemakaian
+            <input type="number" min="0" value={form.usageLimit} onChange={event => updateForm('usageLimit', event.target.value)} placeholder="0 = unlimited" style={{ padding: '0.85rem 1rem', border: '1px solid #d1d5db', borderRadius: '8px', fontWeight: 900 }} />
+          </label>
+          <label style={{ display: 'flex', alignItems: 'center', gap: '0.55rem', padding: '0.85rem 1rem', borderRadius: '8px', border: '1px solid #d1d5db', marginTop: '1.55rem', fontWeight: 900, color: '#475569' }}>
+            <input type="checkbox" checked={form.active} onChange={event => updateForm('active', event.target.checked)} />
+            Aktif
+          </label>
+        </div>
+
+        <div style={{ display: 'flex', gap: '0.75rem', justifyContent: 'flex-end', paddingTop: '0.5rem' }}>
+          {editingId && (
+            <button type="button" onClick={resetForm} style={{ padding: '0.85rem 1rem', borderRadius: '8px', border: '1px solid #e5e7eb', background: '#f8fafc', color: '#111827', cursor: 'pointer', fontWeight: 900 }}>
+              Batal
+            </button>
+          )}
+          <button type="submit" disabled={saving} style={{ padding: '0.85rem 1.4rem', borderRadius: '8px', border: 'none', background: '#f97316', color: 'white', cursor: saving ? 'wait' : 'pointer', fontWeight: 950, boxShadow: '0 8px 18px rgba(249, 115, 22, 0.2)' }}>
+            {saving ? 'Menyimpan...' : editingId ? 'Update Voucher' : 'Tambah Voucher'}
+          </button>
+        </div>
+      </form>
+
+      <section style={{ background: 'white', padding: '2rem', borderRadius: '12px', border: '1px solid #e9ecef', boxShadow: '0 2px 8px rgba(0,0,0,0.02)' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '1rem', marginBottom: '1rem' }}>
+          <div>
+            <h2 style={{ margin: 0, color: '#111827' }}>Daftar Voucher</h2>
+            <p style={{ margin: '0.25rem 0 0', color: '#64748b', fontSize: '0.9rem' }}>Voucher promo yang tersedia untuk event.</p>
+          </div>
+          <button type="button" onClick={loadVouchers} disabled={loading} style={{ padding: '0.65rem 1rem', borderRadius: '8px', border: '1px solid #e5e7eb', background: '#f8fafc', color: '#111827', cursor: loading ? 'wait' : 'pointer', fontWeight: 900 }}>
+            {loading ? 'Loading...' : 'Refresh'}
+          </button>
+        </div>
+
+        {loading ? (
+          <div style={{ padding: '3rem', textAlign: 'center', color: '#64748b', border: '1px dashed #cbd5e1', borderRadius: '12px' }}>Memuat voucher...</div>
+        ) : vouchers.length === 0 ? (
+          <div style={{ padding: '3rem', textAlign: 'center', color: '#64748b', border: '1px dashed #cbd5e1', borderRadius: '12px', fontWeight: 800 }}>Belum ada voucher.</div>
+        ) : (
+          <div style={{ display: 'grid', gap: '0.75rem' }}>
+            {vouchers.map(voucher => {
+              const status = voucherStatus(voucher);
+              const discountLabel = voucher.type === 'percent' ? `${voucher.value}%` : formatCurrency(voucher.value);
+              return (
+                <div key={voucher.id} style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) auto', gap: '1rem', alignItems: 'center', padding: '1rem', border: '1px solid #e5e7eb', borderRadius: '12px', background: editingId === voucher.id ? '#fff7ed' : '#fff' }}>
+                  <div style={{ minWidth: 0 }}>
+                    <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', flexWrap: 'wrap', marginBottom: '0.35rem' }}>
+                      <span style={{ color: '#111827', fontWeight: 950, fontSize: '1.1rem' }}>{voucher.code}</span>
+                      <StatusBadge status={status} />
+                      <span style={{ padding: '0.25rem 0.55rem', borderRadius: '999px', background: '#f1f5f9', color: '#475569', fontSize: '0.75rem', fontWeight: 900 }}>{discountLabel}</span>
+                    </div>
+                    <div style={{ color: '#475569', fontWeight: 800 }}>{voucher.name || '-'}</div>
+                    <div style={{ color: '#94a3b8', fontSize: '0.8rem', marginTop: '0.25rem', fontWeight: 750 }}>
+                      Min {formatCurrency(voucher.minAmount || 0)} · Maks {voucher.maxDiscount ? formatCurrency(voucher.maxDiscount) : 'tanpa batas'} · Dipakai {voucher.usedCount || 0}/{voucher.usageLimit || '∞'}
+                    </div>
+                  </div>
+                  <div style={{ display: 'flex', gap: '0.45rem', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+                    <button type="button" onClick={() => editVoucher(voucher)} style={{ padding: '0.55rem 0.8rem', borderRadius: '8px', border: '1px solid #fed7aa', background: '#fff7ed', color: '#ea580c', cursor: 'pointer', fontWeight: 900 }}>Edit</button>
+                    <button type="button" onClick={() => toggleVoucher(voucher)} style={{ padding: '0.55rem 0.8rem', borderRadius: '8px', border: '1px solid #e5e7eb', background: '#f8fafc', color: '#111827', cursor: 'pointer', fontWeight: 900 }}>{voucher.active ? 'Nonaktifkan' : 'Aktifkan'}</button>
+                    <button type="button" onClick={() => deleteVoucher(voucher)} style={{ padding: '0.55rem 0.8rem', borderRadius: '8px', border: 'none', background: '#fee2e2', color: '#dc2626', cursor: 'pointer', fontWeight: 900 }}>Hapus</button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </section>
     </div>
   );
 }
@@ -1568,7 +4344,7 @@ function AdminUsersTab({ adminToken }) {
             <p style={{ margin: '0.25rem 0 0', color: '#6c757d', fontSize: '0.9rem' }}>Daftar akun admin dari backend.</p>
           </div>
           <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
-            <button onClick={openCreateModal} style={{ padding: '0.6rem 1rem', background: '#00e58c', color: '#111', border: 'none', borderRadius: '6px', cursor: 'pointer', fontWeight: 'bold' }}>
+            <button onClick={openCreateModal} style={{ padding: '0.6rem 1rem', background: '#f97316', color: 'white', border: 'none', borderRadius: '6px', cursor: 'pointer', fontWeight: 'bold' }}>
               + Tambah User
             </button>
             <button onClick={loadUsers} style={{ padding: '0.6rem 1rem', background: '#f8f9fa', color: '#111', border: '1px solid #e9ecef', borderRadius: '6px', cursor: 'pointer', fontWeight: 'bold' }}>
@@ -1693,7 +4469,7 @@ function AdminUsersTab({ adminToken }) {
                   <button type="button" onClick={closeUserModal} disabled={saving} style={{ padding: '0.75rem 1rem', background: '#f8f9fa', color: '#111', border: '1px solid #e9ecef', borderRadius: '8px', cursor: saving ? 'not-allowed' : 'pointer', fontWeight: 'bold' }}>
                     Batal
                   </button>
-                  <button type="submit" disabled={saving} style={{ padding: '0.75rem 1rem', background: '#00e58c', color: '#111', border: 'none', borderRadius: '8px', cursor: saving ? 'not-allowed' : 'pointer', fontWeight: 'bold' }}>
+                  <button type="submit" disabled={saving} style={{ padding: '0.75rem 1rem', background: '#f97316', color: 'white', border: 'none', borderRadius: '8px', cursor: saving ? 'not-allowed' : 'pointer', fontWeight: 'bold' }}>
                     {saving ? 'Menyimpan...' : 'Tambah User'}
                   </button>
                 </div>
@@ -1738,7 +4514,7 @@ function AdminUsersTab({ adminToken }) {
                   <button type="button" onClick={closeUserModal} disabled={updating} style={{ padding: '0.75rem 1rem', background: '#f8f9fa', color: '#111', border: '1px solid #e9ecef', borderRadius: '8px', cursor: updating ? 'not-allowed' : 'pointer', fontWeight: 'bold' }}>
                     Batal
                   </button>
-                  <button type="submit" disabled={updating} style={{ padding: '0.75rem 1rem', background: '#111827', color: 'white', border: 'none', borderRadius: '8px', cursor: updating ? 'not-allowed' : 'pointer', fontWeight: 'bold' }}>
+                  <button type="submit" disabled={updating} style={{ padding: '0.75rem 1rem', background: '#f97316', color: 'white', border: 'none', borderRadius: '8px', cursor: updating ? 'not-allowed' : 'pointer', fontWeight: 'bold' }}>
                     {updating ? 'Menyimpan...' : 'Simpan Edit'}
                   </button>
                 </div>
@@ -1780,14 +4556,31 @@ export default function AdminDashboard() {
   const [adminToken, setAdminToken] = useState('');
   const [adminUser, setAdminUser] = useState(null);
   const [error, setError] = useState('');
+  const [sessionNotice, setSessionNotice] = useState('');
   
   const [activeTab, setActiveTab] = useState('overview');
   
   const [sessions, setSessions] = useState([]);
   const [loading, setLoading] = useState(false);
+  const [sessionDetail, setSessionDetail] = useState(null);
+  const [sessionDetailLoading, setSessionDetailLoading] = useState(false);
+  const [sessionDetailError, setSessionDetailError] = useState('');
+  const [galleryPage, setGalleryPage] = useState(1);
+  const [galleryPageSize, setGalleryPageSize] = useState(10);
   const visibleMenuItems = adminUser?.role === 'staff'
     ? MENU_ITEMS.filter(item => STAFF_ALLOWED_MENUS.has(item.id))
     : MENU_ITEMS;
+
+  const clearAdminSession = (message = '') => {
+    localStorage.removeItem(ADMIN_TOKEN_KEY);
+    localStorage.removeItem(ADMIN_USER_KEY);
+    localStorage.removeItem(ADMIN_EXPIRES_KEY);
+    setIsAuthenticated(false);
+    setAdminToken('');
+    setAdminUser(null);
+    setSessions([]);
+    setSessionNotice(message);
+  };
 
   useEffect(() => {
     if (!isAuthenticated || visibleMenuItems.some(item => item.id === activeTab)) return;
@@ -1795,17 +4588,55 @@ export default function AdminDashboard() {
   }, [isAuthenticated, adminUser?.role, activeTab]);
 
   useEffect(() => {
+    const handleUnauthorized = (event) => {
+      const path = event?.detail?.path || '';
+      if (localStorage.getItem(ADMIN_TOKEN_KEY) && String(path).includes('/api/admin/')) {
+        clearAdminSession('Sesi admin habis. Silakan login ulang.');
+      }
+    };
+    window.addEventListener('backend:unauthorized', handleUnauthorized);
+    return () => window.removeEventListener('backend:unauthorized', handleUnauthorized);
+  }, []);
+
+  useEffect(() => {
+    if (!isAuthenticated) return undefined;
+    const expiresAt = localStorage.getItem(ADMIN_EXPIRES_KEY);
+    if (!expiresAt) return undefined;
+
+    const expiresMs = new Date(expiresAt).getTime();
+    if (!Number.isFinite(expiresMs)) return undefined;
+    const remainingMs = expiresMs - Date.now();
+    if (remainingMs <= 0) {
+      clearAdminSession('Sesi admin habis. Silakan login ulang.');
+      return undefined;
+    }
+
+    const timer = window.setTimeout(() => {
+      clearAdminSession('Sesi admin habis. Silakan login ulang.');
+    }, remainingMs);
+    return () => window.clearTimeout(timer);
+  }, [isAuthenticated]);
+
+  useEffect(() => {
     const savedToken = localStorage.getItem(ADMIN_TOKEN_KEY);
     const savedUser = localStorage.getItem(ADMIN_USER_KEY);
+    const savedExpiresAt = localStorage.getItem(ADMIN_EXPIRES_KEY);
     if (!savedToken) return;
+    if (savedExpiresAt && new Date(savedExpiresAt).getTime() <= Date.now()) {
+      clearAdminSession('Sesi admin habis. Silakan login ulang.');
+      return;
+    }
 
     setAdminToken(savedToken);
+    setIsAuthenticated(true);
     if (savedUser) {
       try {
         setAdminUser(JSON.parse(savedUser));
       } catch {
-        setAdminUser(null);
+        setAdminUser({ email: 'admin', role: 'owner' });
       }
+    } else {
+      setAdminUser({ email: 'admin', role: 'owner' });
     }
 
     backendRequest('/api/admin/auth/me', savedToken)
@@ -1815,12 +4646,12 @@ export default function AdminDashboard() {
         localStorage.setItem(ADMIN_USER_KEY, JSON.stringify(user));
         fetchSessions(savedToken);
       })
-      .catch(() => {
-        localStorage.removeItem(ADMIN_TOKEN_KEY);
-        localStorage.removeItem(ADMIN_USER_KEY);
-        setAdminToken('');
-        setAdminUser(null);
-        setIsAuthenticated(false);
+      .catch((err) => {
+        if (err.status === 401) {
+          clearAdminSession('Sesi admin tidak valid. Silakan login ulang.');
+          return;
+        }
+        setSessionNotice('Admin tetap login dari sesi tersimpan. Backend belum bisa divalidasi, coba refresh data jika koneksi sudah normal.');
       });
   }, []);
 
@@ -1839,9 +4670,15 @@ export default function AdminDashboard() {
       const user = { email: loginEmail, role: result.role };
       localStorage.setItem(ADMIN_TOKEN_KEY, token);
       localStorage.setItem(ADMIN_USER_KEY, JSON.stringify(user));
+      if (result.expiresAt) {
+        localStorage.setItem(ADMIN_EXPIRES_KEY, result.expiresAt);
+      } else {
+        localStorage.removeItem(ADMIN_EXPIRES_KEY);
+      }
       setAdminToken(token);
       setAdminUser(user);
       setIsAuthenticated(true);
+      setSessionNotice('');
       setLoginPassword('');
       fetchSessions(token);
     } catch (err) {
@@ -1859,21 +4696,16 @@ export default function AdminDashboard() {
         console.warn('Logout request failed:', err);
       }
     }
-    localStorage.removeItem(ADMIN_TOKEN_KEY);
-    localStorage.removeItem(ADMIN_USER_KEY);
-    setIsAuthenticated(false);
-    setAdminToken('');
-    setAdminUser(null);
+    clearAdminSession('');
     setLoginEmail('');
     setLoginPassword('');
-    setSessions([]);
   };
 
   const fetchSessions = async (token = adminToken) => {
     if (!token) return;
     setLoading(true);
     try {
-      const data = await backendRequest('/api/admin/sessions', token);
+      const data = await fetchAllAdminRows('/api/admin/sessions', token);
       setSessions(Array.isArray(data) ? data : []);
     } catch (err) {
       console.error('Error fetching sessions:', err);
@@ -1894,6 +4726,31 @@ export default function AdminDashboard() {
     }
   };
 
+  const openSessionDetail = async (sessionId) => {
+    if (!adminToken) return;
+    setSessionDetail({ session: { id: sessionId } });
+    setSessionDetailLoading(true);
+    setSessionDetailError('');
+    try {
+      const detail = await backendRequest(`/api/admin/sessions/${sessionId}`, adminToken);
+      setSessionDetail(detail);
+    } catch (err) {
+      setSessionDetailError(err.message);
+    } finally {
+      setSessionDetailLoading(false);
+    }
+  };
+
+  const galleryTotalPages = Math.max(1, Math.ceil(sessions.length / galleryPageSize));
+  const galleryStartIndex = (galleryPage - 1) * galleryPageSize;
+  const paginatedGallerySessions = sessions.slice(galleryStartIndex, galleryStartIndex + galleryPageSize);
+
+  useEffect(() => {
+    if (galleryPage > galleryTotalPages) {
+      setGalleryPage(galleryTotalPages);
+    }
+  }, [galleryPage, galleryTotalPages]);
+
   if (!isAuthenticated) {
     return (
       <div style={{ display: 'grid', placeItems: 'center', minHeight: '100vh', background: '#f8f9fa' }}>
@@ -1901,6 +4758,7 @@ export default function AdminDashboard() {
           <div style={{ fontSize: '3rem', marginBottom: '1rem' }}>🔒</div>
           <h2 style={{ marginBottom: '0.5rem', color: '#111' }}>Admin Access</h2>
           <p style={{ color: '#6c757d', marginBottom: '2rem', fontSize: '0.9rem' }}>Login dengan akun admin backend.</p>
+          {sessionNotice && <div style={{ marginBottom: '1rem', padding: '0.75rem 0.9rem', borderRadius: '8px', background: '#fff7ed', color: '#c2410c', fontWeight: '800', fontSize: '0.85rem', textAlign: 'left' }}>{sessionNotice}</div>}
           
           <input 
             type="email" 
@@ -1926,7 +4784,7 @@ export default function AdminDashboard() {
           
           {error && <div style={{ color: '#ef4444', marginBottom: '1rem', fontSize: '0.9rem' }}>{error}</div>}
           
-          <button type="submit" style={{ width: '100%', padding: '1rem', background: '#111', color: 'white', borderRadius: '8px', fontWeight: 'bold', fontSize: '1.1rem', cursor: 'pointer', border: 'none' }}>
+          <button type="submit" style={{ width: '100%', padding: '1rem', background: '#f97316', color: 'white', borderRadius: '8px', fontWeight: 'bold', fontSize: '1.1rem', cursor: 'pointer', border: 'none' }}>
             Masuk
           </button>
         </form>
@@ -1956,6 +4814,21 @@ export default function AdminDashboard() {
       
       case 'kiosk':
         return <KioskSettingsTab />;
+
+      case 'booth_health':
+        return <BoothHealthTab adminToken={adminToken} />;
+
+      case 'monitoring':
+        return <MonitoringTab adminToken={adminToken} />;
+
+      case 'recovery':
+        return <RecoveryTab />;
+
+      case 'storage':
+        return <StorageManagementTab adminToken={adminToken} />;
+
+      case 'reports':
+        return <ReportExportTab adminToken={adminToken} adminUser={adminUser} />;
         
       case 'statistic':
         return <StatisticTab sessions={sessions} />;
@@ -2000,35 +4873,36 @@ export default function AdminDashboard() {
         );
         
       case 'frame_photo':
-        return <FramePhotoComposerTab />;
+        return <FramePhotoComposerTab adminToken={adminToken} />;
+
+      case 'voucher':
+        return <VoucherSettingsTab adminToken={adminToken} />;
 
       case 'admin_users':
         return <AdminUsersTab adminToken={adminToken} />;
 
       case 'audit_logs':
-        return (
-          <BackendListTab
-            title="Audit Logs"
-            description="Jejak aksi admin dan webhook."
-            endpoint="/api/admin/audit-logs"
-            adminToken={adminToken}
-            columns={[
-              { key: 'action', label: 'Action' },
-              { key: 'resource', label: 'Resource' },
-              { key: 'actorId', label: 'Actor', render: row => row.actorId || '-' },
-              { key: 'success', label: 'Success', render: row => row.success ? 'Yes' : 'No' },
-              { key: 'ip', label: 'IP' },
-              { key: 'createdAt', label: 'Created', render: row => formatDateTime(row.createdAt) },
-            ]}
-          />
-        );
+        return <AuditActivityTab adminToken={adminToken} />;
       
       case 'gallery':
+        const exportGallerySessions = () => {
+          if (!sessions.length) {
+            alert('Belum ada session/gallery untuk diekspor.');
+            return;
+          }
+          downloadCSV(`urbanmenphoto_gallery_sessions_${reportDateStamp()}.csv`, sessions, SESSION_EXPORT_COLUMNS);
+        };
         return (
           <div style={{ background: 'white', padding: '2rem', borderRadius: '12px', border: '1px solid #e9ecef', boxShadow: '0 2px 8px rgba(0,0,0,0.02)' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.5rem' }}>
-              <h2 style={{ margin: 0, color: '#111' }}>Customer Gallery Logs</h2>
-              <button onClick={() => fetchSessions()} style={{ padding: '0.5rem 1rem', background: '#f8f9fa', border: '1px solid #e9ecef', borderRadius: '6px', cursor: 'pointer' }}>Refresh</button>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.5rem', gap: '1rem', flexWrap: 'wrap' }}>
+              <div>
+                <h2 style={{ margin: 0, color: '#111' }}>Customer Gallery Logs</h2>
+                <p style={{ margin: '0.25rem 0 0', color: '#6c757d', fontSize: '0.9rem' }}>{sessions.length} session termuat di halaman admin.</p>
+              </div>
+              <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+                <button onClick={() => fetchSessions()} style={{ padding: '0.5rem 1rem', background: '#f8f9fa', border: '1px solid #e9ecef', borderRadius: '6px', cursor: 'pointer', fontWeight: 'bold' }}>Refresh</button>
+                <button onClick={exportGallerySessions} style={{ padding: '0.5rem 1rem', background: '#111827', color: 'white', border: 'none', borderRadius: '6px', cursor: 'pointer', fontWeight: 'bold' }}>Export CSV</button>
+              </div>
             </div>
             
             {loading ? (
@@ -2047,8 +4921,13 @@ export default function AdminDashboard() {
                     </tr>
                   </thead>
                   <tbody>
-                    {sessions.map(s => {
-                      const imageList = s.images || [];
+                    {paginatedGallerySessions.map(s => {
+                      const imageList = Array.from(new Set([
+                        s.animatedImage?.url,
+                        s.finalImage?.url,
+                        s.printImage?.url,
+                        ...(s.images || []),
+                      ].filter(Boolean)));
                       const previews = imageList.slice(0, 3);
                       
                       return (
@@ -2078,6 +4957,12 @@ export default function AdminDashboard() {
                                 View
                               </a>
                               <button 
+                                onClick={() => openSessionDetail(s.id)}
+                                style={{ display: 'inline-flex', padding: '0.4rem 0.8rem', background: '#fff7ed', color: '#ea580c', border: '1px solid #fed7aa', borderRadius: '6px', fontSize: '0.85rem', fontWeight: 'bold', cursor: 'pointer' }}
+                              >
+                                Detail
+                              </button>
+                              <button 
                                 onClick={() => deleteSession(s.id)}
                                 style={{ display: 'inline-flex', padding: '0.4rem 0.8rem', background: '#fee2e2', color: '#ef4444', border: 'none', borderRadius: '6px', fontSize: '0.85rem', fontWeight: 'bold', cursor: 'pointer' }}
                               >
@@ -2090,6 +4975,17 @@ export default function AdminDashboard() {
                     })}
                   </tbody>
                 </table>
+                <AdminPagination
+                  page={galleryPage}
+                  totalPages={galleryTotalPages}
+                  pageSize={galleryPageSize}
+                  total={sessions.length}
+                  onPageChange={setGalleryPage}
+                  onPageSizeChange={(size) => {
+                    setGalleryPageSize(size);
+                    setGalleryPage(1);
+                  }}
+                />
               </div>
             )}
           </div>
@@ -2110,19 +5006,13 @@ export default function AdminDashboard() {
   return (
     <div style={{ display: 'flex', height: '100vh', backgroundColor: '#f8f9fa', fontFamily: "'Inter', sans-serif" }}>
       {/* Sidebar Navigation */}
-      <aside style={{ width: '260px', backgroundColor: '#f4f5f7', borderRight: '1px solid #e9ecef', display: 'flex', flexDirection: 'column', flexShrink: 0 }}>
-        <div style={{ padding: '2rem 1.5rem', borderBottom: '1px solid #e9ecef', marginBottom: '1rem' }}>
-          <h1 style={{ margin: 0, fontSize: '1.2rem', fontWeight: '900', letterSpacing: '1px', color: '#111' }}>POTOBOX<span style={{color: '#10B981'}}>.</span></h1>
-          <div style={{ fontSize: '0.75rem', color: '#868e96', marginTop: '0.2rem', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Admin Panel v1.0</div>
-          {adminUser && (
-            <div style={{ fontSize: '0.75rem', color: '#495057', marginTop: '0.75rem', lineHeight: 1.4 }}>
-              <div style={{ fontWeight: 'bold' }}>{adminUser.email}</div>
-              <div style={{ color: '#868e96', textTransform: 'uppercase' }}>{adminUser.role}</div>
-            </div>
-          )}
+      <aside style={{ width: '292px', backgroundColor: '#f4f5f8', borderRight: '1px solid #e5e7eb', display: 'flex', flexDirection: 'column', flexShrink: 0 }}>
+        <div style={{ padding: '2.65rem 1.75rem 2.35rem', borderBottom: '1px solid #e5e7eb' }}>
+          <h1 style={{ margin: 0, fontSize: '1.52rem', fontWeight: 950, letterSpacing: '0.055em', color: '#111', lineHeight: 1 }}>POTOBOX<span style={{ color: '#10b981' }}>.</span></h1>
+          <div style={{ fontSize: '1rem', color: '#9aa1aa', marginTop: '0.85rem', textTransform: 'uppercase', letterSpacing: '0.105em', fontWeight: 500 }}>Admin Panel v1.0</div>
         </div>
         
-        <nav style={{ padding: '0 1rem', flex: 1, overflowY: 'auto' }}>
+        <nav style={{ padding: '1.6rem 1.1rem 1.2rem', flex: 1, overflowY: 'auto' }}>
           {visibleMenuItems.map(item => {
             const isActive = activeTab === item.id;
             return (
@@ -2130,30 +5020,43 @@ export default function AdminDashboard() {
                 key={item.id}
                 onClick={() => setActiveTab(item.id)}
                 style={{
-                  display: 'flex', alignItems: 'center', gap: '1rem', width: '100%', 
-                  padding: '0.8rem 1rem', border: 'none', 
-                  background: isActive ? '#00e58c' : 'transparent', // The bright green from the mockup
-                  color: isActive ? '#111' : '#495057', 
-                  fontWeight: isActive ? '600' : '500',
-                  textAlign: 'left', cursor: 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '1.35rem',
+                  width: '100%',
+                  minHeight: '54px',
+                  padding: '0.85rem 1.05rem',
+                  border: 'none',
+                  background: isActive ? '#ff6f16' : 'transparent',
+                  color: isActive ? '#fff' : '#555c66',
+                  fontSize: '1.05rem',
+                  fontWeight: isActive ? 850 : 650,
+                  textAlign: 'left',
+                  cursor: 'pointer',
                   borderRadius: '8px',
-                  marginBottom: '0.2rem',
-                  transition: 'background 0.2s, color 0.2s'
+                  marginBottom: '0.43rem',
+                  transition: 'background 0.2s, color 0.2s, transform 0.2s',
                 }}
               >
-                <div style={{ opacity: isActive ? 1 : 0.7, display: 'flex' }}>
+                <div style={{ opacity: isActive ? 1 : 0.72, display: 'flex', alignItems: 'center', justifyContent: 'center', width: '26px', color: 'inherit' }}>
                   {item.icon}
                 </div>
-                {item.label}
+                <span style={{ lineHeight: 1 }}>{item.label}</span>
               </button>
             )
           })}
         </nav>
 
-        <div style={{ padding: '1.5rem', borderTop: '1px solid #e9ecef' }}>
+        <div style={{ padding: '1.6rem 1.75rem 1.9rem', borderTop: '1px solid #e5e7eb' }}>
+          {adminUser && (
+            <div style={{ marginBottom: '1.65rem', lineHeight: 1.25 }}>
+              <div style={{ fontSize: '0.92rem', color: '#4b5563', fontWeight: 900, overflowWrap: 'anywhere' }}>{adminUser.email}</div>
+              <div style={{ color: '#9aa1aa', textTransform: 'uppercase', fontSize: '0.86rem', letterSpacing: '0.045em', marginTop: '0.3rem', fontWeight: 600 }}>{adminUser.role}</div>
+            </div>
+          )}
           <button 
             onClick={handleLogout}
-            style={{ width: '100%', padding: '0.8rem', background: 'transparent', color: '#ef4444', border: '1px solid #ef4444', borderRadius: '8px', cursor: 'pointer', fontWeight: 'bold' }}
+            style={{ width: '100%', minHeight: '52px', padding: '0.9rem', background: 'transparent', color: '#ef4444', border: '1px solid #ff6b6b', borderRadius: '10px', cursor: 'pointer', fontSize: '1rem', fontWeight: 900 }}
           >
             Logout
           </button>
@@ -2164,6 +5067,14 @@ export default function AdminDashboard() {
       <main style={{ flex: 1, padding: '3rem', overflowY: 'auto' }}>
         {renderContent()}
       </main>
+      {sessionDetail && (
+        <AdminSessionDetailModal
+          detail={sessionDetail}
+          loading={sessionDetailLoading}
+          error={sessionDetailError}
+          onClose={() => setSessionDetail(null)}
+        />
+      )}
     </div>
   );
 }
