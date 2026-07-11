@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { QRCodeSVG } from 'qrcode.react';
 import { backendRequest } from '../utils/backendApi.js';
+import { getRecoveryHistory } from '../utils/sessionRecovery.js';
 
 const OriginalSnapItem = ({ url, staticUrl, label, isGifFile, idx, downloadImage, onItemClick }) => {
   const [isHovered, setIsHovered] = useState(false);
@@ -62,12 +63,42 @@ export default function MobileGalleryView({ sessionId }) {
   const [selectedVideo, setSelectedVideo] = useState(null);
 
   useEffect(() => {
+    const readCachedGallery = (id) => {
+      if (!id) return null;
+      const storedSession = window.localStorage.getItem(`potobox_gallery_${id}`);
+      return storedSession ? JSON.parse(storedSession) : null;
+    };
+
+    const findCachedGallery = () => {
+      const direct = readCachedGallery(sessionId);
+      if (direct) return direct;
+
+      const recovery = getRecoveryHistory().find((item) => (
+        item?.backendSessionId === sessionId ||
+        item?.id === sessionId ||
+        item?.localGalleryId === sessionId
+      ));
+      if (!recovery) return null;
+
+      const cached = readCachedGallery(recovery.backendSessionId) ||
+        readCachedGallery(recovery.localGalleryId) ||
+        readCachedGallery(recovery.id);
+      if (!cached) return null;
+
+      return {
+        ...cached,
+        id: sessionId,
+        backendSessionId: recovery.backendSessionId || sessionId,
+        localGalleryId: recovery.localGalleryId || cached.localGalleryId,
+      };
+    };
+
     async function fetchGallery() {
       if (sessionId?.startsWith('local-')) {
         try {
-          const storedSession = window.localStorage.getItem(`potobox_gallery_${sessionId}`);
-          if (!storedSession) throw new Error('Galeri lokal tidak ditemukan. Selesaikan sesi foto dulu di browser yang sama.');
-          setSessionData(JSON.parse(storedSession));
+          const cached = readCachedGallery(sessionId);
+          if (!cached) throw new Error('Galeri lokal tidak ditemukan. Selesaikan sesi foto dulu di browser yang sama.');
+          setSessionData(cached);
         } catch (err) {
           console.error('Error fetching local gallery:', err);
           setError(err.message || 'Gagal memuat galeri lokal.');
@@ -94,7 +125,13 @@ export default function MobileGalleryView({ sessionId }) {
         });
       } catch (err) {
         console.error('Error fetching gallery:', err);
-        setError(err.message || 'Gagal memuat galeri foto.');
+        const cached = findCachedGallery();
+        if (cached?.images?.length) {
+          setSessionData(cached);
+          setError(null);
+        } else {
+          setError(err.message || 'Gagal memuat galeri foto.');
+        }
       } finally {
         setLoading(false);
       }

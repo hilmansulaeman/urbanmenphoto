@@ -341,11 +341,20 @@ export default function LiveWallView({ orderDetails, upsellDetails, capturedPhot
               ...images,
               ...capturedPhotos.map(photo => photo.src).filter(Boolean),
             ].filter(Boolean);
-            window.localStorage.setItem(`potobox_gallery_${localGalleryId}`, JSON.stringify({
+            const localGalleryPayload = {
               id: localGalleryId,
               images: localImages,
               createdAt: new Date().toISOString(),
-            }));
+            };
+            window.localStorage.setItem(`potobox_gallery_${localGalleryId}`, JSON.stringify(localGalleryPayload));
+            if (backendSession?.id) {
+              window.localStorage.setItem(`potobox_gallery_${backendSession.id}`, JSON.stringify({
+                ...localGalleryPayload,
+                id: backendSession.id,
+                localGalleryId,
+                backendSessionId: backendSession.id,
+              }));
+            }
             setDownloadUrl(galleryUrlFor(localGalleryId));
             saveRecoverySession({
               id: backendSession?.id || localGalleryId,

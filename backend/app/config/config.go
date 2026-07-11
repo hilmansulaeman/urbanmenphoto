@@ -117,6 +117,9 @@ func dotEnvPaths() []string {
 }
 
 func defaultRuntimeDirs() (string, string) {
+	if os.Getenv("VERCEL") != "" {
+		return filepath.Join(os.TempDir(), "urbanmenphoto", "data"), filepath.Join(os.TempDir(), "urbanmenphoto", "storage")
+	}
 	cwd, err := os.Getwd()
 	if err == nil && strings.EqualFold(filepath.Base(cwd), "backend") {
 		return "data", "storage"
