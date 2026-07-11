@@ -41,8 +41,8 @@ const icons = {
 
 const topSteps = [
   { id: 1, title: 'KETUK MULAI', desc: 'Ketuk tombol untuk memulai', icon: icons.pointer, num: 1 },
-  { id: 2, title: 'PEMBAYARAN', desc: 'Melakukan Pembayaran', icon: icons.wallet, num: 3 },
-  { id: 3, title: 'AMBIL FOTO', desc: 'Ambil 5 foto luar biasa', icon: icons.camera, num: 2 },
+  { id: 2, title: 'PEMBAYARAN', desc: 'Melakukan Pembayaran', icon: icons.wallet, num: 2 },
+  { id: 3, title: 'AMBIL FOTO', desc: 'Ambil 5 foto luar biasa', icon: icons.camera, num: 3 },
 ];
 
 const bottomSteps = [

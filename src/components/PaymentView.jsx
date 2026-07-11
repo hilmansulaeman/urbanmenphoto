@@ -5,7 +5,7 @@ import { backendRequest, reportMonitoringError } from '../utils/backendApi.js';
 export default function PaymentView({ orderDetails, onPaymentSuccess, onBack, title = "PEMBAYARAN", description = "Scan QRIS di bawah ini menggunakan aplikasi e-wallet Anda", showFeatures = false }) {
   const [isSimulating, setIsSimulating] = useState(false);
   const [paymentError, setPaymentError] = useState('');
-  const [customerEmail, setCustomerEmail] = useState(orderDetails.email || orderDetails.backendSession?.email || '');
+  const [customerEmail] = useState(orderDetails.email || orderDetails.backendSession?.email || '');
   const paymentMode = String(import.meta.env.VITE_PAYMENT_MODE || import.meta.env.VITE_MIDTRANS_ENVIRONMENT || 'sandbox').toLowerCase();
   const isDummyPayment = paymentMode === 'dummy';
   const normalizedEmail = customerEmail.trim().toLowerCase();
@@ -109,6 +109,22 @@ export default function PaymentView({ orderDetails, onPaymentSuccess, onBack, ti
       }
 
       const snap = await loadMidtransSnap();
+      const confirmPayment = async (result, fallbackStatus = '') => {
+        const transactionStatus = result?.transaction_status || fallbackStatus;
+        return backendRequest(`/api/payments/${payment.id}/confirm`, null, {
+          method: 'POST',
+          sessionToken: session.customerToken,
+          body: JSON.stringify({
+            order_id: result?.order_id || payment.id,
+            transaction_status: transactionStatus,
+            fraud_status: result?.fraud_status || '',
+            status_code: result?.status_code || '',
+            gross_amount: result?.gross_amount ? String(result.gross_amount) : String(currentTotal),
+            payment_type: result?.payment_type || '',
+            transaction_id: result?.transaction_id || '',
+          }),
+        });
+      };
       snap.pay(payment.snapToken, {
         onSuccess: async (result) => {
           logTransaction({
@@ -118,18 +134,28 @@ export default function PaymentView({ orderDetails, onPaymentSuccess, onBack, ti
             status: result?.transaction_status || 'Success'
           });
           try {
-            payment = await backendRequest(`/api/payments/${payment.id}`, null);
-          } catch {
-            // Webhook may still be processing; continue with the original payment data.
+            payment = await confirmPayment(result, 'settlement');
+          } catch (confirmErr) {
+            console.warn('Payment confirmation failed; falling back to payment fetch.', confirmErr);
+            try {
+              payment = await backendRequest(`/api/payments/${payment.id}`, null);
+            } catch {
+              // Webhook may still be processing; continue with the original payment data.
+            }
           }
           onPaymentSuccess({ session, payment, midtransResult: result });
         },
-        onPending: (result) => {
+        onPending: async (result) => {
+          try {
+            payment = await confirmPayment(result, 'pending');
+          } catch (confirmErr) {
+            console.warn('Pending payment confirmation failed.', confirmErr);
+          }
           setIsSimulating(false);
           setPaymentError('Pembayaran masih pending. Selesaikan pembayaran dari aplikasi Anda.');
           console.info('Midtrans pending payment:', result);
         },
-        onError: (result) => {
+        onError: async (result) => {
           reportMonitoringError({
             category: 'payment',
             sessionId: session.id,
@@ -137,6 +163,11 @@ export default function PaymentView({ orderDetails, onPaymentSuccess, onBack, ti
             source: 'payment_view',
             metadata: { result, paymentId: payment.id },
           });
+          try {
+            payment = await confirmPayment(result, 'failure');
+          } catch (confirmErr) {
+            console.warn('Failed payment confirmation failed.', confirmErr);
+          }
           setIsSimulating(false);
           setPaymentError('Pembayaran gagal. Silakan coba lagi.');
         },
@@ -176,97 +207,60 @@ export default function PaymentView({ orderDetails, onPaymentSuccess, onBack, ti
   }
 
   return (
-    <section className="wizard-step" aria-label="Payment">
-      <header className="wizard-header">
-        {onBack && <button className="back-button" onClick={onBack}>← Back</button>}
-        <h2>{title}</h2>
-        <p className="subtitle">{description}</p>
+    <section className="wizard-step payment-step" aria-label="Payment">
+      <header className="payment-header">
+        {onBack && <button className="payment-back-button" onClick={onBack}>← Back</button>}
+        <div className="payment-title-block">
+          <h2>{title}</h2>
+          <p>{description}</p>
+        </div>
       </header>
 
-      <div className="payment-content">
-        <div className="order-summary">
-          <h3>Ringkasan Pesanan</h3>
-          
-          {showFeatures && (
-            <>
-              <div style={{ textAlign: 'left', marginBottom: '1.5rem', background: '#f8fafc', padding: '1.25rem', borderRadius: '12px', fontSize: '0.85rem' }}>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '0.6rem', color: 'var(--ink)' }}>
-                  <div>Maks. 5 orang</div>
-                  <div>5 menit sesi Foto</div>
-                  <div>1 lembar cetak (tambah cetak 5.000)</div>
-                  <div>QR digital (send email/QR Download foto, link aktif 7 hari)</div>
-                </div>
+      <div className="payment-card">
+        <h3>Ringkasan Pesanan</h3>
+
+        {showFeatures ? (
+          <div className="payment-feature-box">
+            <div>Maks. 5 orang</div>
+            <div>5 menit sesi</div>
+            <div>QR digital (send email/QR Download foto, link aktif 7 hari)</div>
+          </div>
+        ) : (
+          <div className="payment-detail-list">
+            {orderDetails.tier && (
+              <div className="summary-row">
+                <span>Paket {orderDetails.tier.name}</span>
+                <span>Rp {orderDetails.tier.pricePerHead?.toLocaleString('id-ID')} / org</span>
               </div>
-            </>
-          )}
-          
-          {orderDetails.tier && !showFeatures && (
-            <div className="summary-row">
-              <span>Paket {orderDetails.tier.name}</span>
-              <span>Rp {orderDetails.tier.pricePerHead?.toLocaleString('id-ID')} / org</span>
-            </div>
-          )}
+            )}
 
-          {orderDetails.headCount && !showFeatures && (
-            <div className="summary-row">
-              <span>Jumlah Orang</span>
-              <span>{orderDetails.headCount}x</span>
-            </div>
-          )}
+            {orderDetails.headCount && (
+              <div className="summary-row">
+                <span>Jumlah Orang</span>
+                <span>{orderDetails.headCount}x</span>
+              </div>
+            )}
 
-          {orderDetails.upsellDetails && orderDetails.upsellDetails.map((item, idx) => (
-            <div className="summary-row" key={idx}>
-              <span>{item.name}</span>
-              <span>Rp {item.price.toLocaleString('id-ID')}</span>
-            </div>
-          ))}
-
-          <div className="summary-row total">
-            <span>Total Bayar</span>
-            <span>Rp {currentTotal.toLocaleString('id-ID')}</span>
+            {orderDetails.upsellDetails && orderDetails.upsellDetails.map((item, idx) => (
+              <div className="summary-row" key={idx}>
+                <span>{item.name}</span>
+                <span>Rp {item.price.toLocaleString('id-ID')}</span>
+              </div>
+            ))}
           </div>
+        )}
 
-          <label style={{ display: 'block', marginTop: '1.25rem', textAlign: 'left', color: '#64748b', fontSize: '0.85rem', fontWeight: 800 }}>
-            Email Customer
-            <input
-              type="email"
-              value={customerEmail}
-              onChange={(event) => setCustomerEmail(event.target.value)}
-              placeholder="nama@email.com"
-              style={{
-                display: 'block',
-                width: '100%',
-                marginTop: '0.5rem',
-                border: '1px solid #d1d5db',
-                borderRadius: '12px',
-                padding: '0.95rem 1rem',
-                fontSize: '1rem',
-                fontWeight: 800,
-                color: '#111827',
-                outline: 'none',
-              }}
-            />
-          </label>
-
-          <button className="primary-action simulate-btn" onClick={handleMidtransPayment} style={{ marginTop: '2rem' }}>
-            {isDummyPayment ? 'Bayar Dummy' : 'Bayar dengan Midtrans'}
-          </button>
-          {paymentError && (
-            <p style={{ margin: '1rem 0 0', color: '#dc2626', fontWeight: 700, fontSize: '0.85rem' }}>{paymentError}</p>
-          )}
+        <div className="payment-total-row">
+          <span>Total Bayar</span>
+          <span>Rp {currentTotal.toLocaleString('id-ID')}</span>
         </div>
 
-        <div className="qris-container">
-          <div className="qr-mock" style={{ padding: '0', background: 'transparent', border: 'none' }}>
-            <div style={{ width: '250px', height: '250px', borderRadius: '16px', background: '#fff7ed', border: '1px solid #fed7aa', display: 'grid', placeItems: 'center', textAlign: 'center', color: '#ea580c', fontWeight: 900, padding: '1rem' }}>
-              Midtrans Snap
-            </div>
-          </div>
-          <p className="payment-instruction">
-            Mendukung pembayaran dari:<br/>
-            <strong>Gopay, OVO, Dana, ShopeePay, BCA, dll</strong>
-          </p>
-        </div>
+        <button className="primary-action payment-action-button" onClick={handleMidtransPayment}>
+          {isDummyPayment ? 'Simulasikan Bayar Berhasil' : 'Bayar Sekarang'}
+        </button>
+        {paymentError && (
+          <p className="payment-error">{paymentError}</p>
+        )}
       </div>
     </section>
   );

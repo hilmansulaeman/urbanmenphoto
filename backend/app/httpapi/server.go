@@ -957,6 +957,8 @@ func (s *Server) handlePaymentByID(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, http.StatusOK, response{Data: payment})
+	case r.Method == http.MethodPost && action == "confirm":
+		s.confirmPayment(w, r, paymentID)
 	case r.Method == http.MethodPost && action == "webhook":
 		s.handlePaymentWebhook(w, r, paymentID)
 	default:
@@ -1479,6 +1481,101 @@ func (s *Server) sendGalleryEmail(recipient string, downloadURL string) error {
 	}
 	auth := smtp.PlainAuth("", strings.TrimSpace(s.cfg.SMTPUsername), strings.TrimSpace(s.cfg.SMTPPassword), host)
 	return smtp.SendMail(host+":"+port, auth, envelopeFrom, []string{recipient}, []byte(message))
+}
+
+func (s *Server) confirmPayment(w http.ResponseWriter, r *http.Request, paymentID string) {
+	if !s.allowRequest(r, "payment-confirm", 30) {
+		writeError(w, http.StatusTooManyRequests, "Too many payment confirmation requests. Please wait before trying again.")
+		return
+	}
+
+	var body models.PaymentWebhookRequest
+	if err := readJSON(r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	payment, ok := s.store.FindPayment(paymentID)
+	if !ok {
+		writeError(w, http.StatusNotFound, "Payment not found.")
+		return
+	}
+	session, ok := s.store.FindSession(payment.SessionID)
+	if !ok {
+		writeError(w, http.StatusNotFound, "Session not found.")
+		return
+	}
+	if err := requireCustomerSession(r, session); err != nil {
+		writeError(w, http.StatusUnauthorized, err.Error())
+		return
+	}
+	if body.OrderID != "" && body.OrderID != payment.ID {
+		writeError(w, http.StatusBadRequest, "order_id does not match payment.")
+		return
+	}
+
+	status := body.Status
+	if status == "" {
+		status = normalizeMidtransPaymentStatus(body)
+	}
+	if !validPaymentStatus(status) {
+		writeError(w, http.StatusBadRequest, "payment status is invalid.")
+		return
+	}
+
+	statusBefore := payment.Status
+	payment.Status = status
+	if body.TransactionID != "" {
+		payment.ProviderRef = &body.TransactionID
+	}
+	payment.UpdatedAt = time.Now()
+
+	if err := s.store.UpdatePayment(payment); err != nil {
+		s.recordMonitoringError(r, "payment", payment.ID, "Failed to confirm payment.", map[string]any{
+			"error":        err.Error(),
+			"statusBefore": statusBefore,
+			"statusAfter":  payment.Status,
+		})
+		writeError(w, http.StatusInternalServerError, "Failed to update payment.")
+		return
+	}
+	if err := s.insertPaymentLog(r, "payment.customer_confirm", payment, &statusBefore, map[string]any{
+		"paymentId":         payment.ID,
+		"sessionId":         payment.SessionID,
+		"status":            status,
+		"orderId":           body.OrderID,
+		"transactionStatus": body.TransactionStatus,
+		"fraudStatus":       body.FraudStatus,
+		"statusCode":        body.StatusCode,
+		"grossAmount":       body.GrossAmount,
+		"paymentType":       body.PaymentType,
+		"transactionId":     body.TransactionID,
+	}); err != nil {
+		s.recordMonitoringError(r, "payment", payment.ID, "Failed to save payment confirmation log.", map[string]any{
+			"error":        err.Error(),
+			"statusBefore": statusBefore,
+			"statusAfter":  payment.Status,
+		})
+		writeError(w, http.StatusInternalServerError, "Failed to save payment log.")
+		return
+	}
+
+	if status == "paid" || status == "success" {
+		session.Status = "paid"
+		session.UpdatedAt = time.Now()
+		_ = s.store.UpdateSession(session)
+	}
+	s.auditWithMetadata(r, nil, "payment.customer_confirm", payment.ID, true, map[string]any{
+		"payment": map[string]any{
+			"id":           payment.ID,
+			"sessionId":    payment.SessionID,
+			"provider":     payment.Provider,
+			"statusBefore": statusBefore,
+			"statusAfter":  payment.Status,
+		},
+	})
+
+	writeJSON(w, http.StatusOK, response{Data: payment})
 }
 
 func (s *Server) handlePaymentWebhook(w http.ResponseWriter, r *http.Request, paymentID string) {
