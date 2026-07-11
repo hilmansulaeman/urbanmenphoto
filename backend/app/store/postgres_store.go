@@ -2,6 +2,7 @@ package store
 
 import (
 	"database/sql"
+	_ "embed"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -11,6 +12,9 @@ import (
 
 	"urbanmenphoto/backend/app/models"
 )
+
+//go:embed migrations/001_initial_schema.sql
+var embeddedInitialSchema string
 
 type PostgresStore struct {
 	db *sql.DB
@@ -36,7 +40,7 @@ func (s *PostgresStore) applyMigrations() error {
 	migrationPath := resolveMigrationPath()
 	query, err := os.ReadFile(migrationPath)
 	if err != nil {
-		return err
+		query = []byte(embeddedInitialSchema)
 	}
 	_, err = s.db.Exec(string(query))
 	return err
