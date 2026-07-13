@@ -235,6 +235,34 @@ export default function LiveWallView({ orderDetails, upsellDetails, capturedPhot
       }
 
       const publicDownloadUrl = galleryUrlFor(backendSession.id);
+      const backendImages = Array.from(new Set([
+        finalized.animatedImage?.url,
+        finalized.finalImage?.url,
+        finalized.printImage?.url,
+        ...(finalized.images || []),
+      ].filter(Boolean)));
+      if (backendImages.length > 0) {
+        const backendGalleryPayload = {
+          ...finalized,
+          id: backendSession.id,
+          sessionId: backendSession.id,
+          backendSessionId: backendSession.id,
+          localGalleryId,
+          images: backendImages,
+          downloadUrl: publicDownloadUrl,
+          createdAt: finalized.createdAt || new Date().toISOString(),
+          finalizedAt: new Date().toISOString(),
+        };
+        try {
+          window.localStorage.setItem(`potobox_gallery_${backendSession.id}`, JSON.stringify(backendGalleryPayload));
+          window.localStorage.setItem(`potobox_gallery_${localGalleryId}`, JSON.stringify({
+            ...backendGalleryPayload,
+            id: localGalleryId,
+          }));
+        } catch (cacheErr) {
+          console.warn('Failed to refresh backend gallery cache', cacheErr);
+        }
+      }
       setDownloadUrl(publicDownloadUrl);
       setBackendSaveStatus('saved');
       persistRecoverySession({

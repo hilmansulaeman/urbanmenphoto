@@ -1,7 +1,51 @@
 import { useState, useEffect, useRef } from 'react';
 import { QRCodeSVG } from 'qrcode.react';
-import { backendRequest } from '../utils/backendApi.js';
+import { backendRequest, getBackendApiUrl } from '../utils/backendApi.js';
 import { getRecoveryHistory } from '../utils/sessionRecovery.js';
+
+const ABSOLUTE_URL_PATTERN = /^[a-z][a-z\d+\-.]*:/i;
+const DATA_URL_PATTERN = /^data:/i;
+
+const normalizeGalleryAssetUrl = (rawUrl, sessionId = '') => {
+  const value = String(rawUrl || '').trim();
+  if (!value) return '';
+  if (DATA_URL_PATTERN.test(value) || ABSOLUTE_URL_PATTERN.test(value)) return value;
+
+  const backendBaseUrl = getBackendApiUrl().replace(/\/$/, '');
+  const cleanPath = value.replace(/^\/+/, '');
+
+  if (cleanPath.startsWith('files/')) {
+    return `${backendBaseUrl}/${cleanPath}`;
+  }
+  if (cleanPath.startsWith('sessions/')) {
+    return `${backendBaseUrl}/files/${cleanPath}`;
+  }
+  if (sessionId && !cleanPath.includes('/')) {
+    return `${backendBaseUrl}/files/sessions/${sessionId}/${cleanPath}`;
+  }
+
+  return `${backendBaseUrl}/files/${cleanPath}`;
+};
+
+const normalizeGalleryPayload = (payload, fallbackSessionId = '') => {
+  if (!payload) return payload;
+  const resolvedSessionId = payload.sessionId || payload.backendSessionId || fallbackSessionId || payload.id || '';
+  const imageUrls = [
+    payload.animatedImage?.url,
+    payload.finalImage?.url,
+    payload.printImage?.url,
+    ...(payload.images || []),
+  ]
+    .map((url) => normalizeGalleryAssetUrl(url, resolvedSessionId))
+    .filter(Boolean);
+
+  return {
+    ...payload,
+    id: payload.id || payload.sessionId || resolvedSessionId,
+    sessionId: payload.sessionId || resolvedSessionId,
+    images: Array.from(new Set(imageUrls)),
+  };
+};
 
 const OriginalSnapItem = ({ url, staticUrl, label, isGifFile, idx, downloadImage, onItemClick }) => {
   const [isHovered, setIsHovered] = useState(false);
@@ -88,15 +132,15 @@ export default function MobileGalleryView({ sessionId }) {
       return {
         ...cached,
         id: sessionId,
-        backendSessionId: recovery.backendSessionId || sessionId,
-        localGalleryId: recovery.localGalleryId || cached.localGalleryId,
+          backendSessionId: recovery.backendSessionId || sessionId,
+          localGalleryId: recovery.localGalleryId || cached.localGalleryId,
+        };
       };
-    };
 
     async function fetchGallery() {
       if (sessionId?.startsWith('local-')) {
         try {
-          const cached = readCachedGallery(sessionId);
+          const cached = normalizeGalleryPayload(readCachedGallery(sessionId), sessionId);
           if (!cached) throw new Error('Galeri lokal tidak ditemukan. Selesaikan sesi foto dulu di browser yang sama.');
           setSessionData(cached);
         } catch (err) {
@@ -112,20 +156,10 @@ export default function MobileGalleryView({ sessionId }) {
         const data = await backendRequest(`/api/galleries/${sessionId}`);
         if (!data) throw new Error('Sesi foto tidak ditemukan.');
 
-        const imageUrls = [
-          data.animatedImage?.url,
-          data.finalImage?.url,
-          data.printImage?.url,
-          ...(data.images || []),
-        ].filter(Boolean);
-        setSessionData({
-          ...data,
-          id: data.sessionId,
-          images: Array.from(new Set(imageUrls)),
-        });
+        setSessionData(normalizeGalleryPayload(data, sessionId));
       } catch (err) {
         console.error('Error fetching gallery:', err);
-        const cached = findCachedGallery();
+        const cached = normalizeGalleryPayload(findCachedGallery(), sessionId);
         if (cached?.images?.length) {
           setSessionData(cached);
           setError(null);
