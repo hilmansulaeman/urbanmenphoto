@@ -39,6 +39,8 @@ const DownloadIcon = () => (
 export default function CameraView({ filter, poseLimit = 5, onFinishSession }) {
   const videoRef = useRef(null);
   const streamRef = useRef(null);
+  const pickerVideoRefs = useRef({});
+  const pickerStreamsRef = useRef({});
   const [cameraSettings] = useState(() => getKioskSettings());
   const [cameraProfiles] = useState(() => getCameraProfiles(getKioskSettings()));
   const [activeCameraId, setActiveCameraId] = useState(() => getCameraProfiles(getKioskSettings())[0]?.id || 'camera-1');
@@ -56,6 +58,8 @@ export default function CameraView({ filter, poseLimit = 5, onFinishSession }) {
   // Customer chooses an angle before the first shot and after each completed shot.
   const [isCameraPickerOpen, setIsCameraPickerOpen] = useState(true);
   const [cameraAttempt, setCameraAttempt] = useState(0);
+  const [cameraPreviewReady, setCameraPreviewReady] = useState({});
+  const [cameraPreviewErrors, setCameraPreviewErrors] = useState({});
   const activeCamera = cameraProfiles.find(profile => profile.id === activeCameraId) || cameraProfiles[0];
 
   useEffect(() => {
@@ -104,6 +108,55 @@ export default function CameraView({ filter, poseLimit = 5, onFinishSession }) {
       stopStream(streamRef.current);
     };
   }, [activeCamera?.deviceId, activeCamera?.facingMode, activeCamera?.id, cameraSettings.defaultCamera, isCameraPickerOpen, cameraAttempt]);
+
+  useEffect(() => {
+    if (!isCameraPickerOpen) return undefined;
+
+    let cancelled = false;
+    setCameraPreviewReady({});
+    setCameraPreviewErrors({});
+
+    const startPreviews = async () => {
+      for (const profile of cameraProfiles) {
+        try {
+          const resolved = await getCameraStreamForProfile(profile, cameraSettings.defaultCamera || 'user');
+          if (cancelled) {
+            stopStream(resolved.stream);
+            return;
+          }
+          pickerStreamsRef.current[profile.id] = resolved.stream;
+          if (resolved.recovered) {
+            const latestSettings = getKioskSettings();
+            saveKioskSettings({
+              ...latestSettings,
+              cameraProfiles: latestSettings.cameraProfiles.map(item => item.id === profile.id
+                ? { ...item, deviceId: resolved.deviceId, deviceLabel: resolved.deviceLabel }
+                : item),
+            });
+          }
+          const preview = pickerVideoRefs.current[profile.id];
+          if (preview) {
+            preview.srcObject = resolved.stream;
+            await preview.play();
+            if (!cancelled) setCameraPreviewReady(previous => ({ ...previous, [profile.id]: true }));
+          }
+        } catch (previewError) {
+          if (!cancelled) setCameraPreviewErrors(previous => ({
+            ...previous,
+            [profile.id]: previewError?.message || 'Kamera tidak dapat dibuka.',
+          }));
+        }
+      }
+    };
+
+    startPreviews();
+
+    return () => {
+      cancelled = true;
+      Object.values(pickerStreamsRef.current).forEach(stopStream);
+      pickerStreamsRef.current = {};
+    };
+  }, [cameraProfiles, cameraSettings.defaultCamera, isCameraPickerOpen]);
 
   const handleCaptureClick = () => {
     if (!videoRef.current || !isReady || isRecordingBurst || countdown !== null) return;
@@ -448,11 +501,19 @@ export default function CameraView({ filter, poseLimit = 5, onFinishSession }) {
                   aria-label={`Pilih ${profile.name}`}
                   style={{ position: 'relative', minHeight: 'min(58vh, 720px)', padding: 0, overflow: 'hidden', borderRadius: '20px', border: `2px solid ${profile.id === activeCameraId ? '#ff7414' : '#111'}`, background: '#000', color: 'white', cursor: 'pointer', boxShadow: profile.id === activeCameraId ? '0 0 0 4px rgba(255,116,20,.12)' : 'none' }}
                 >
+                  <video
+                    ref={(element) => { pickerVideoRefs.current[profile.id] = element; }}
+                    className={profile.mirror ? 'is-mirrored' : ''}
+                    autoPlay
+                    muted
+                    playsInline
+                    style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover' }}
+                  />
                   <span style={{ position: 'absolute', top: '1.1rem', left: '1.1rem', zIndex: 1, minWidth: '240px', padding: '0.5rem 1rem', borderRadius: '999px', background: '#ff7414', color: 'white', fontSize: '0.9rem', fontWeight: 900, letterSpacing: '.08em', textTransform: 'uppercase' }}>{profile.name}</span>
-                  <span style={{ position: 'absolute', inset: 0, display: 'grid', placeItems: 'center' }}>
+                  <span style={{ position: 'absolute', inset: 0, display: 'grid', placeItems: 'center', opacity: cameraPreviewReady[profile.id] ? 0 : 1, transition: 'opacity .2s' }}>
                     <span style={{ display: 'grid', justifyItems: 'center', gap: '0.8rem', maxWidth: '78%', textAlign: 'center' }}>
                       <span style={{ display: 'grid', width: '110px', height: '110px', placeItems: 'center', borderRadius: '50%', background: '#8b8b8b', color: '#101010' }}><CameraIcon /></span>
-                      <span style={{ color: 'white', fontSize: '0.92rem', fontWeight: 700 }}>Pilih untuk menyalakan kamera</span>
+                      <span style={{ color: 'white', fontSize: '0.92rem', fontWeight: 700 }}>{cameraPreviewErrors[profile.id] || 'Menyalakan kamera...'}</span>
                     </span>
                   </span>
                   <span style={{ position: 'absolute', right: 0, bottom: 0, left: 0, padding: '1.15rem', background: '#ff7414', color: 'white', fontSize: '0.95rem', fontWeight: 900, letterSpacing: '.08em', textTransform: 'uppercase' }}>{profile.name}</span>
