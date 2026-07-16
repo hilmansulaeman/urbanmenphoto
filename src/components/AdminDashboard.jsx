@@ -6,7 +6,7 @@ import { getFrameSettings, saveFrameSettings } from '../utils/frameConfig.js';
 import { fetchCustomFrames, setCustomFrameDisabled, validateFrameConfig } from '../utils/customFrameConfig.js';
 import { FRAMES } from '../utils/photoConfig.js';
 import { BACKEND_API_URL, backendRequest, formatCurrency, formatDateTime, getBackendApiUrl, reportMonitoringError } from '../utils/backendApi.js';
-import { getCameraStream, listVideoDevices, stopStream } from '../utils/camera.js';
+import { getCameraStream, getCameraStreamForProfile, listVideoDevices, stopStream } from '../utils/camera.js';
 import { clearRecoveryHistory, getRecoveryHistory, getRecoverySession, removeRecoverySession, saveRecoverySession } from '../utils/sessionRecovery.js';
 
 const ADMIN_TOKEN_KEY = 'urbanmenphoto_admin_token';
@@ -407,11 +407,7 @@ function KioskSettingsTab() {
     try {
       let permissionStream = null;
       if (requestPermission) {
-        const firstCamera = settings.cameraProfiles?.[0];
-        permissionStream = await getCameraStream({
-          facingMode: firstCamera?.facingMode || settings.defaultCamera || 'user',
-          deviceId: firstCamera?.deviceId,
-        });
+        permissionStream = await getCameraStream('user');
       }
       const devices = await listVideoDevices();
       stopStream(permissionStream);
@@ -445,6 +441,14 @@ function KioskSettingsTab() {
     }));
   };
 
+  const getCameraProfileStatus = (profile) => {
+    if (!profile.enabled) return { text: 'Nonaktif', color: '#6b7280', background: '#f3f4f6' };
+    if (!profile.deviceId) return { text: 'Belum memilih perangkat', color: '#92400e', background: '#fef3c7' };
+    if (cameraDevices.some(device => device.deviceId === profile.deviceId)) return { text: 'Terdeteksi dan siap diuji', color: '#166534', background: '#dcfce7' };
+    if (profile.deviceLabel && cameraDevices.some(device => device.label === profile.deviceLabel)) return { text: 'Perangkat ada, ID berubah — test untuk sinkronkan', color: '#92400e', background: '#fef3c7' };
+    return { text: 'Perangkat tidak terdeteksi', color: '#991b1b', background: '#fee2e2' };
+  };
+
   const handleTestCamera = async (cameraId) => {
     setIsTestingCamera(true);
     setCameraMessage('');
@@ -452,10 +456,8 @@ function KioskSettingsTab() {
     try {
       const cameraProfile = settings.cameraProfiles?.find(profile => profile.id === cameraId) || settings.cameraProfiles?.[0];
       setPreviewCameraId(cameraProfile?.id || '');
-      const stream = await getCameraStream({
-        facingMode: cameraProfile?.facingMode || settings.defaultCamera || 'user',
-        deviceId: cameraProfile?.deviceId,
-      });
+      const resolved = await getCameraStreamForProfile(cameraProfile, settings.defaultCamera || 'user');
+      const { stream } = resolved;
       previewStreamRef.current = stream;
       if (previewVideoRef.current) {
         previewVideoRef.current.srcObject = stream;
@@ -464,7 +466,10 @@ function KioskSettingsTab() {
       const devices = await listVideoDevices();
       setCameraDevices(devices);
       const activeTrack = stream.getVideoTracks?.()[0];
-      updateCameraProfile(cameraProfile?.id || 'camera-1', { deviceLabel: activeTrack?.label || cameraProfile?.deviceLabel || '' });
+      updateCameraProfile(cameraProfile?.id || 'camera-1', {
+        deviceId: resolved.deviceId || cameraProfile?.deviceId || '',
+        deviceLabel: activeTrack?.label || resolved.deviceLabel || cameraProfile?.deviceLabel || '',
+      });
       setCameraMessage(`Preview ${cameraProfile?.name || 'kamera'} aktif.`);
     } catch (err) {
       setCameraMessage(err.message || 'Kamera tidak bisa ditest.');
@@ -785,6 +790,10 @@ function KioskSettingsTab() {
                   <option value="">{index === 0 ? 'Auto / Browser Default' : 'Pilih perangkat Kamera 2'}</option>
                   {cameraDevices.map((device, deviceIndex) => <option key={device.deviceId || deviceIndex} value={device.deviceId}>{device.label || `Camera ${deviceIndex + 1}`}</option>)}
                 </select>
+                {(() => {
+                  const status = getCameraProfileStatus(profile);
+                  return <div style={{ marginTop: '0.6rem', padding: '0.45rem 0.6rem', borderRadius: '7px', color: status.color, background: status.background, fontSize: '0.78rem', fontWeight: 800 }}>{status.text}</div>;
+                })()}
                 <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginTop: '0.7rem', color: '#495057', fontSize: '0.85rem', fontWeight: 'bold' }}>
                   <input type="checkbox" checked={Boolean(profile.enabled)} onChange={(event) => updateCameraProfile(profile.id, { enabled: event.target.checked })} style={{ width: 17, height: 17, accentColor: '#f97316' }} />
                   Aktifkan pilihan posisi ini

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
-import { captureVideoFrame, getCameraStream, stopStream } from '../utils/camera.js';
-import { getCameraProfiles, getKioskSettings } from '../utils/kioskConfig.js';
+import { captureVideoFrame, getCameraStreamForProfile, stopStream } from '../utils/camera.js';
+import { getCameraProfiles, getKioskSettings, saveKioskSettings } from '../utils/kioskConfig.js';
 
 const RetakeIcon = () => (
   <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#6b7280" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ width: 18, height: 18 }}>
@@ -39,8 +39,6 @@ const DownloadIcon = () => (
 export default function CameraView({ filter, poseLimit = 5, onFinishSession }) {
   const videoRef = useRef(null);
   const streamRef = useRef(null);
-  const pickerVideoRefs = useRef({});
-  const pickerStreamsRef = useRef({});
   const [cameraSettings] = useState(() => getKioskSettings());
   const [cameraProfiles] = useState(() => getCameraProfiles(getKioskSettings()));
   const [activeCameraId, setActiveCameraId] = useState(() => getCameraProfiles(getKioskSettings())[0]?.id || 'camera-1');
@@ -57,8 +55,7 @@ export default function CameraView({ filter, poseLimit = 5, onFinishSession }) {
   const [playbackFrameIdx, setPlaybackFrameIdx] = useState(0);
   // Customer chooses an angle before the first shot and after each completed shot.
   const [isCameraPickerOpen, setIsCameraPickerOpen] = useState(true);
-  const [cameraPreviewReady, setCameraPreviewReady] = useState({});
-  const [cameraPreviewErrors, setCameraPreviewErrors] = useState({});
+  const [cameraAttempt, setCameraAttempt] = useState(0);
   const activeCamera = cameraProfiles.find(profile => profile.id === activeCameraId) || cameraProfiles[0];
 
   useEffect(() => {
@@ -69,46 +66,33 @@ export default function CameraView({ filter, poseLimit = 5, onFinishSession }) {
       setError('');
       stopStream(streamRef.current);
 
-      // The selection screen manages its own preview streams.
+      // Do not request browser permission until the customer picks an angle.
       if (isCameraPickerOpen) return;
 
       try {
-        const stream = await getCameraStream({
-          facingMode: activeCamera?.facingMode || cameraSettings.defaultCamera || 'user',
-          deviceId: activeCamera?.deviceId,
-        });
+        const resolved = await getCameraStreamForProfile(activeCamera, cameraSettings.defaultCamera || 'user');
+        const { stream } = resolved;
         if (cancelled) {
           stopStream(stream);
           return;
         }
 
         streamRef.current = stream;
+        if (resolved.recovered && activeCamera?.id) {
+          const latestSettings = getKioskSettings();
+          saveKioskSettings({
+            ...latestSettings,
+            cameraProfiles: latestSettings.cameraProfiles.map(profile => profile.id === activeCamera.id
+              ? { ...profile, deviceId: resolved.deviceId, deviceLabel: resolved.deviceLabel }
+              : profile),
+          });
+        }
         if (videoRef.current) {
           videoRef.current.srcObject = stream;
           await videoRef.current.play();
           setIsReady(true);
         }
       } catch (cameraError) {
-        if (activeCamera?.deviceId) {
-          try {
-            const fallbackStream = await getCameraStream(activeCamera?.facingMode || cameraSettings.defaultCamera || 'user');
-            if (cancelled) {
-              stopStream(fallbackStream);
-              return;
-            }
-            streamRef.current = fallbackStream;
-            if (videoRef.current) {
-              videoRef.current.srcObject = fallbackStream;
-              await videoRef.current.play();
-              setIsReady(true);
-              setError('');
-              return;
-            }
-          } catch (fallbackError) {
-            setError(fallbackError.message || 'Kamera tidak bisa diakses.');
-            return;
-          }
-        }
         setError(cameraError.message || 'Kamera tidak bisa diakses.');
       }
     }
@@ -119,63 +103,7 @@ export default function CameraView({ filter, poseLimit = 5, onFinishSession }) {
       cancelled = true;
       stopStream(streamRef.current);
     };
-  }, [activeCamera?.deviceId, activeCamera?.facingMode, cameraSettings.defaultCamera, isCameraPickerOpen]);
-
-  useEffect(() => {
-    if (!isCameraPickerOpen) return undefined;
-
-    let cancelled = false;
-    setCameraPreviewReady({});
-    setCameraPreviewErrors({});
-
-    const startPreviews = async () => {
-      // Open one device at a time. Virtual/mobile cameras on macOS can reject
-      // simultaneous getUserMedia requests while their driver is initializing.
-      for (const profile of cameraProfiles) {
-        try {
-          let stream;
-          try {
-            stream = await getCameraStream({
-              facingMode: profile.facingMode || 'user',
-              deviceId: profile.deviceId,
-            });
-          } catch (deviceError) {
-            // Continuity/virtual-camera device IDs can change after reconnecting.
-            // Use the configured camera direction just as the capture screen does.
-            if (!profile.deviceId) throw deviceError;
-            stream = await getCameraStream(profile.facingMode || 'user');
-          }
-          if (cancelled) {
-            stopStream(stream);
-            return;
-          }
-          pickerStreamsRef.current[profile.id] = stream;
-          const preview = pickerVideoRefs.current[profile.id];
-          if (preview) {
-            preview.srcObject = stream;
-            await preview.play();
-            if (!cancelled) setCameraPreviewReady(previous => ({ ...previous, [profile.id]: true }));
-          }
-        } catch (previewError) {
-          if (!cancelled) {
-            setCameraPreviewErrors(previous => ({
-              ...previous,
-              [profile.id]: previewError?.message || 'Kamera tidak dapat dibuka. Pastikan perangkat tidak dipakai aplikasi lain.',
-            }));
-          }
-          console.warn(`Kamera ${profile.name} tidak dapat dibuka.`, previewError);
-        }
-      }
-    };
-
-    startPreviews();
-
-    return () => {
-      cancelled = true;
-      Object.values(pickerStreamsRef.current).forEach(stopStream);
-      pickerStreamsRef.current = {};
-    };
-  }, [cameraProfiles, isCameraPickerOpen]);
+  }, [activeCamera?.deviceId, activeCamera?.facingMode, activeCamera?.id, cameraSettings.defaultCamera, isCameraPickerOpen, cameraAttempt]);
 
   const handleCaptureClick = () => {
     if (!videoRef.current || !isReady || isRecordingBurst || countdown !== null) return;
@@ -318,7 +246,15 @@ export default function CameraView({ filter, poseLimit = 5, onFinishSession }) {
         )}
 
         {!isReady && !error && <div style={{ position: 'absolute', color: 'white' }}>Menyalakan kamera...</div>}
-        {error && <div style={{ position: 'absolute', color: '#ef4444' }}>{error}</div>}
+        {error && (
+          <div style={{ position: 'absolute', zIndex: 20, maxWidth: '80%', padding: '1rem', borderRadius: '12px', background: 'rgba(17,24,39,.88)', color: 'white', textAlign: 'center' }}>
+            <div style={{ marginBottom: '0.8rem', color: '#fecaca' }}>{error}</div>
+            <div style={{ display: 'flex', justifyContent: 'center', gap: '0.6rem' }}>
+              <button type="button" onClick={() => setCameraAttempt(value => value + 1)} style={{ padding: '0.55rem .8rem', border: 0, borderRadius: '8px', background: '#ff7414', color: 'white', fontWeight: 800, cursor: 'pointer' }}>Coba lagi</button>
+              <button type="button" onClick={() => setIsCameraPickerOpen(true)} style={{ padding: '0.55rem .8rem', border: 0, borderRadius: '8px', background: 'white', color: '#111827', fontWeight: 800, cursor: 'pointer' }}>Ganti kamera</button>
+            </div>
+          </div>
+        )}
 
         {/* Center Capture Button */}
         {isReady && capturedPhotos.length < poseLimit && !isAutoCapturing && !isCameraPickerOpen && (
@@ -512,19 +448,11 @@ export default function CameraView({ filter, poseLimit = 5, onFinishSession }) {
                   aria-label={`Pilih ${profile.name}`}
                   style={{ position: 'relative', minHeight: 'min(58vh, 720px)', padding: 0, overflow: 'hidden', borderRadius: '20px', border: `2px solid ${profile.id === activeCameraId ? '#ff7414' : '#111'}`, background: '#000', color: 'white', cursor: 'pointer', boxShadow: profile.id === activeCameraId ? '0 0 0 4px rgba(255,116,20,.12)' : 'none' }}
                 >
-                  <video
-                    ref={(element) => { pickerVideoRefs.current[profile.id] = element; }}
-                    className={profile.mirror ? 'is-mirrored' : ''}
-                    autoPlay
-                    muted
-                    playsInline
-                    style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover' }}
-                  />
                   <span style={{ position: 'absolute', top: '1.1rem', left: '1.1rem', zIndex: 1, minWidth: '240px', padding: '0.5rem 1rem', borderRadius: '999px', background: '#ff7414', color: 'white', fontSize: '0.9rem', fontWeight: 900, letterSpacing: '.08em', textTransform: 'uppercase' }}>{profile.name}</span>
-                  <span style={{ position: 'absolute', inset: 0, display: 'grid', placeItems: 'center', opacity: cameraPreviewReady[profile.id] ? 0 : 1, transition: 'opacity .2s' }}>
+                  <span style={{ position: 'absolute', inset: 0, display: 'grid', placeItems: 'center' }}>
                     <span style={{ display: 'grid', justifyItems: 'center', gap: '0.8rem', maxWidth: '78%', textAlign: 'center' }}>
                       <span style={{ display: 'grid', width: '110px', height: '110px', placeItems: 'center', borderRadius: '50%', background: '#8b8b8b', color: '#101010' }}><CameraIcon /></span>
-                      {cameraPreviewErrors[profile.id] && <span style={{ color: 'white', fontSize: '0.9rem', fontWeight: 700, lineHeight: 1.4 }}>{cameraPreviewErrors[profile.id]}</span>}
+                      <span style={{ color: 'white', fontSize: '0.92rem', fontWeight: 700 }}>Pilih untuk menyalakan kamera</span>
                     </span>
                   </span>
                   <span style={{ position: 'absolute', right: 0, bottom: 0, left: 0, padding: '1.15rem', background: '#ff7414', color: 'white', fontSize: '0.95rem', fontWeight: 900, letterSpacing: '.08em', textTransform: 'uppercase' }}>{profile.name}</span>
