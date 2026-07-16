@@ -383,6 +383,7 @@ function KioskSettingsTab() {
   const [cameraMessage, setCameraMessage] = useState('');
   const [isLoadingCameras, setIsLoadingCameras] = useState(false);
   const [isTestingCamera, setIsTestingCamera] = useState(false);
+  const [previewCameraId, setPreviewCameraId] = useState('');
   const [isTestPrintActive, setIsTestPrintActive] = useState(false);
   const previewVideoRef = useRef(null);
   const previewStreamRef = useRef(null);
@@ -444,15 +445,16 @@ function KioskSettingsTab() {
     }));
   };
 
-  const handleTestCamera = async () => {
+  const handleTestCamera = async (cameraId) => {
     setIsTestingCamera(true);
     setCameraMessage('');
     stopStream(previewStreamRef.current);
     try {
-      const firstCamera = settings.cameraProfiles?.[0];
+      const cameraProfile = settings.cameraProfiles?.find(profile => profile.id === cameraId) || settings.cameraProfiles?.[0];
+      setPreviewCameraId(cameraProfile?.id || '');
       const stream = await getCameraStream({
-        facingMode: firstCamera?.facingMode || settings.defaultCamera || 'user',
-        deviceId: firstCamera?.deviceId,
+        facingMode: cameraProfile?.facingMode || settings.defaultCamera || 'user',
+        deviceId: cameraProfile?.deviceId,
       });
       previewStreamRef.current = stream;
       if (previewVideoRef.current) {
@@ -462,8 +464,8 @@ function KioskSettingsTab() {
       const devices = await listVideoDevices();
       setCameraDevices(devices);
       const activeTrack = stream.getVideoTracks?.()[0];
-      updateCameraProfile('camera-1', { deviceLabel: activeTrack?.label || firstCamera?.deviceLabel || '' });
-      setCameraMessage('Preview kamera aktif.');
+      updateCameraProfile(cameraProfile?.id || 'camera-1', { deviceLabel: activeTrack?.label || cameraProfile?.deviceLabel || '' });
+      setCameraMessage(`Preview ${cameraProfile?.name || 'kamera'} aktif.`);
     } catch (err) {
       setCameraMessage(err.message || 'Kamera tidak bisa ditest.');
     } finally {
@@ -474,6 +476,7 @@ function KioskSettingsTab() {
   const handleStopPreview = () => {
     stopStream(previewStreamRef.current);
     previewStreamRef.current = null;
+    setPreviewCameraId('');
     if (previewVideoRef.current) {
       previewVideoRef.current.srcObject = null;
     }
@@ -801,19 +804,22 @@ function KioskSettingsTab() {
                 ref={previewVideoRef}
                 muted
                 playsInline
-                className={settings.cameraProfiles?.[0]?.mirror ? 'is-mirrored' : ''}
+                className={settings.cameraProfiles?.find(profile => profile.id === previewCameraId)?.mirror ? 'is-mirrored' : ''}
                 style={{ width: '100%', height: '100%', minHeight: '180px', objectFit: 'cover', display: 'block' }}
               />
             </div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: '0.65rem' }}>
-              <button
-                type="button"
-                onClick={handleTestCamera}
-                disabled={isTestingCamera}
-                style={{ padding: '0.85rem 1rem', background: '#f97316', color: 'white', border: 'none', borderRadius: '8px', cursor: isTestingCamera ? 'wait' : 'pointer', fontWeight: 'bold' }}
-              >
-                {isTestingCamera ? 'Testing...' : 'Test Preview'}
-              </button>
+              {(settings.cameraProfiles || []).filter(profile => profile.enabled).map((profile, index) => (
+                <button
+                  key={profile.id}
+                  type="button"
+                  onClick={() => handleTestCamera(profile.id)}
+                  disabled={isTestingCamera}
+                  style={{ padding: '0.85rem 1rem', background: '#f97316', color: 'white', border: 'none', borderRadius: '8px', cursor: isTestingCamera ? 'wait' : 'pointer', fontWeight: 'bold' }}
+                >
+                  {isTestingCamera && previewCameraId === profile.id ? 'Menyalakan...' : `Test Kamera ${index + 1}`}
+                </button>
+              ))}
               <button
                 type="button"
                 onClick={handleStopPreview}

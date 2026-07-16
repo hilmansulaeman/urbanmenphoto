@@ -58,6 +58,7 @@ export default function CameraView({ filter, poseLimit = 5, onFinishSession }) {
   // Customer chooses an angle before the first shot and after each completed shot.
   const [isCameraPickerOpen, setIsCameraPickerOpen] = useState(true);
   const [cameraPreviewReady, setCameraPreviewReady] = useState({});
+  const [cameraPreviewErrors, setCameraPreviewErrors] = useState({});
   const activeCamera = cameraProfiles.find(profile => profile.id === activeCameraId) || cameraProfiles[0];
 
   useEffect(() => {
@@ -125,14 +126,25 @@ export default function CameraView({ filter, poseLimit = 5, onFinishSession }) {
 
     let cancelled = false;
     setCameraPreviewReady({});
+    setCameraPreviewErrors({});
 
     const startPreviews = async () => {
-      await Promise.all(cameraProfiles.map(async (profile) => {
+      // Open one device at a time. Virtual/mobile cameras on macOS can reject
+      // simultaneous getUserMedia requests while their driver is initializing.
+      for (const profile of cameraProfiles) {
         try {
-          const stream = await getCameraStream({
-            facingMode: profile.facingMode || 'user',
-            deviceId: profile.deviceId,
-          });
+          let stream;
+          try {
+            stream = await getCameraStream({
+              facingMode: profile.facingMode || 'user',
+              deviceId: profile.deviceId,
+            });
+          } catch (deviceError) {
+            // Continuity/virtual-camera device IDs can change after reconnecting.
+            // Use the configured camera direction just as the capture screen does.
+            if (!profile.deviceId) throw deviceError;
+            stream = await getCameraStream(profile.facingMode || 'user');
+          }
           if (cancelled) {
             stopStream(stream);
             return;
@@ -145,9 +157,15 @@ export default function CameraView({ filter, poseLimit = 5, onFinishSession }) {
             if (!cancelled) setCameraPreviewReady(previous => ({ ...previous, [profile.id]: true }));
           }
         } catch (previewError) {
+          if (!cancelled) {
+            setCameraPreviewErrors(previous => ({
+              ...previous,
+              [profile.id]: previewError?.message || 'Kamera tidak dapat dibuka. Pastikan perangkat tidak dipakai aplikasi lain.',
+            }));
+          }
           console.warn(`Kamera ${profile.name} tidak dapat dibuka.`, previewError);
         }
-      }));
+      }
     };
 
     startPreviews();
@@ -504,7 +522,10 @@ export default function CameraView({ filter, poseLimit = 5, onFinishSession }) {
                   />
                   <span style={{ position: 'absolute', top: '1.1rem', left: '1.1rem', zIndex: 1, minWidth: '240px', padding: '0.5rem 1rem', borderRadius: '999px', background: '#ff7414', color: 'white', fontSize: '0.9rem', fontWeight: 900, letterSpacing: '.08em', textTransform: 'uppercase' }}>{profile.name}</span>
                   <span style={{ position: 'absolute', inset: 0, display: 'grid', placeItems: 'center', opacity: cameraPreviewReady[profile.id] ? 0 : 1, transition: 'opacity .2s' }}>
-                    <span style={{ display: 'grid', width: '110px', height: '110px', placeItems: 'center', borderRadius: '50%', background: '#8b8b8b', color: '#101010' }}><CameraIcon /></span>
+                    <span style={{ display: 'grid', justifyItems: 'center', gap: '0.8rem', maxWidth: '78%', textAlign: 'center' }}>
+                      <span style={{ display: 'grid', width: '110px', height: '110px', placeItems: 'center', borderRadius: '50%', background: '#8b8b8b', color: '#101010' }}><CameraIcon /></span>
+                      {cameraPreviewErrors[profile.id] && <span style={{ color: 'white', fontSize: '0.9rem', fontWeight: 700, lineHeight: 1.4 }}>{cameraPreviewErrors[profile.id]}</span>}
+                    </span>
                   </span>
                   <span style={{ position: 'absolute', right: 0, bottom: 0, left: 0, padding: '1.15rem', background: '#ff7414', color: 'white', fontSize: '0.95rem', fontWeight: 900, letterSpacing: '.08em', textTransform: 'uppercase' }}>{profile.name}</span>
                 </button>
