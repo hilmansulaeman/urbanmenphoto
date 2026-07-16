@@ -406,9 +406,10 @@ function KioskSettingsTab() {
     try {
       let permissionStream = null;
       if (requestPermission) {
+        const firstCamera = settings.cameraProfiles?.[0];
         permissionStream = await getCameraStream({
-          facingMode: settings.defaultCamera || 'user',
-          deviceId: settings.cameraDeviceId,
+          facingMode: firstCamera?.facingMode || settings.defaultCamera || 'user',
+          deviceId: firstCamera?.deviceId,
         });
       }
       const devices = await listVideoDevices();
@@ -433,10 +434,13 @@ function KioskSettingsTab() {
   const handleCameraDeviceChange = (e) => {
     const deviceId = e.target.value;
     const selectedDevice = cameraDevices.find(device => device.deviceId === deviceId);
+    updateCameraProfile('camera-1', { deviceId, deviceLabel: selectedDevice?.label || '' });
+  };
+
+  const updateCameraProfile = (profileId, changes) => {
     setSettings(prev => ({
       ...prev,
-      cameraDeviceId: deviceId,
-      cameraDeviceLabel: selectedDevice?.label || '',
+      cameraProfiles: (prev.cameraProfiles || []).map(profile => profile.id === profileId ? { ...profile, ...changes } : profile),
     }));
   };
 
@@ -445,9 +449,10 @@ function KioskSettingsTab() {
     setCameraMessage('');
     stopStream(previewStreamRef.current);
     try {
+      const firstCamera = settings.cameraProfiles?.[0];
       const stream = await getCameraStream({
-        facingMode: settings.defaultCamera || 'user',
-        deviceId: settings.cameraDeviceId,
+        facingMode: firstCamera?.facingMode || settings.defaultCamera || 'user',
+        deviceId: firstCamera?.deviceId,
       });
       previewStreamRef.current = stream;
       if (previewVideoRef.current) {
@@ -457,10 +462,7 @@ function KioskSettingsTab() {
       const devices = await listVideoDevices();
       setCameraDevices(devices);
       const activeTrack = stream.getVideoTracks?.()[0];
-      setSettings(prev => ({
-        ...prev,
-        cameraDeviceLabel: activeTrack?.label || prev.cameraDeviceLabel,
-      }));
+      updateCameraProfile('camera-1', { deviceLabel: activeTrack?.label || firstCamera?.deviceLabel || '' });
       setCameraMessage('Preview kamera aktif.');
     } catch (err) {
       setCameraMessage(err.message || 'Kamera tidak bisa ditest.');
@@ -760,49 +762,38 @@ function KioskSettingsTab() {
           </div>
 
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem', marginBottom: '1rem' }}>
-            <div>
-              <label style={{ display: 'block', marginBottom: '0.45rem', fontWeight: 'bold', color: '#495057', fontSize: '0.9rem' }}>Kamera Terpilih</label>
-              <select
-                name="cameraDeviceId"
-                value={settings.cameraDeviceId || ''}
-                onChange={handleCameraDeviceChange}
-                style={{ width: '100%', padding: '0.8rem', borderRadius: '8px', border: '1px solid #ced4da', fontSize: '1rem', backgroundColor: 'white' }}
-              >
-                <option value="">Auto / Browser Default</option>
-                {cameraDevices.map((device, index) => (
-                  <option key={device.deviceId || index} value={device.deviceId}>
-                    {device.label || `Camera ${index + 1}`}
-                  </option>
-                ))}
-              </select>
-              <p style={{ fontSize: '0.78rem', color: '#868e96', marginTop: '0.35rem' }}>
-                {settings.cameraDeviceLabel ? `Tersimpan: ${settings.cameraDeviceLabel}` : 'Klik Refresh Kamera kalau label belum muncul.'}
-              </p>
-            </div>
-
-            <div>
-              <label style={{ display: 'block', marginBottom: '0.45rem', fontWeight: 'bold', color: '#495057', fontSize: '0.9rem' }}>Fallback Facing Mode</label>
-              <select
-                name="defaultCamera"
-                value={settings.defaultCamera}
-                onChange={handleChange}
-                style={{ width: '100%', padding: '0.8rem', borderRadius: '8px', border: '1px solid #ced4da', fontSize: '1rem', backgroundColor: 'white' }}
-              >
-                <option value="user">Kamera Depan / Webcam</option>
-                <option value="environment">Kamera Belakang / Capture Card</option>
-              </select>
-              <label style={{ display: 'flex', alignItems: 'center', gap: '0.55rem', marginTop: '0.75rem', color: '#495057', fontWeight: 'bold', fontSize: '0.88rem' }}>
+            {(settings.cameraProfiles || []).map((profile, index) => (
+              <div key={profile.id} style={{ padding: '1rem', borderRadius: '10px', border: '1px solid #fed7aa', background: 'white' }}>
+                <label style={{ display: 'block', marginBottom: '0.45rem', fontWeight: 'bold', color: '#495057', fontSize: '0.9rem' }}>Posisi Kamera {index + 1}</label>
                 <input
-                  type="checkbox"
-                  name="mirrorCamera"
-                  checked={Boolean(settings.mirrorCamera)}
-                  onChange={handleChange}
-                  style={{ width: 18, height: 18, accentColor: '#f97316' }}
+                  value={profile.name || ''}
+                  onChange={(event) => updateCameraProfile(profile.id, { name: event.target.value })}
+                  placeholder={`Posisi Kamera ${index + 1}`}
+                  style={{ width: '100%', boxSizing: 'border-box', marginBottom: '0.6rem', padding: '0.7rem', borderRadius: '8px', border: '1px solid #ced4da' }}
                 />
-                Mirror preview & hasil foto
-              </label>
-            </div>
+                <select
+                  value={profile.deviceId || ''}
+                  onChange={(event) => {
+                    const device = cameraDevices.find(item => item.deviceId === event.target.value);
+                    updateCameraProfile(profile.id, { deviceId: event.target.value, deviceLabel: device?.label || '' });
+                  }}
+                  style={{ width: '100%', padding: '0.7rem', borderRadius: '8px', border: '1px solid #ced4da', background: 'white' }}
+                >
+                  <option value="">{index === 0 ? 'Auto / Browser Default' : 'Pilih perangkat Kamera 2'}</option>
+                  {cameraDevices.map((device, deviceIndex) => <option key={device.deviceId || deviceIndex} value={device.deviceId}>{device.label || `Camera ${deviceIndex + 1}`}</option>)}
+                </select>
+                <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginTop: '0.7rem', color: '#495057', fontSize: '0.85rem', fontWeight: 'bold' }}>
+                  <input type="checkbox" checked={Boolean(profile.enabled)} onChange={(event) => updateCameraProfile(profile.id, { enabled: event.target.checked })} style={{ width: 17, height: 17, accentColor: '#f97316' }} />
+                  Aktifkan pilihan posisi ini
+                </label>
+                <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginTop: '0.45rem', color: '#495057', fontSize: '0.85rem', fontWeight: 'bold' }}>
+                  <input type="checkbox" checked={Boolean(profile.mirror)} onChange={(event) => updateCameraProfile(profile.id, { mirror: event.target.checked })} style={{ width: 17, height: 17, accentColor: '#f97316' }} />
+                  Mirror preview & hasil
+                </label>
+              </div>
+            ))}
           </div>
+          <p style={{ margin: '0 0 1rem', fontSize: '0.78rem', color: '#868e96' }}>Pilih perangkat berbeda untuk Posisi 1 dan Posisi 2, lalu simpan. Customer akan memilih posisi setelah tiap foto.</p>
 
           <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 180px', gap: '1rem', alignItems: 'stretch' }}>
             <div style={{ background: '#111827', borderRadius: '12px', minHeight: '180px', overflow: 'hidden', display: 'grid', placeItems: 'center', border: '1px solid #1f2937' }}>
@@ -810,7 +801,7 @@ function KioskSettingsTab() {
                 ref={previewVideoRef}
                 muted
                 playsInline
-                className={settings.mirrorCamera ? 'is-mirrored' : ''}
+                className={settings.cameraProfiles?.[0]?.mirror ? 'is-mirrored' : ''}
                 style={{ width: '100%', height: '100%', minHeight: '180px', objectFit: 'cover', display: 'block' }}
               />
             </div>

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { captureVideoFrame, getCameraStream, stopStream } from '../utils/camera.js';
-import { getKioskSettings } from '../utils/kioskConfig.js';
+import { getCameraProfiles, getKioskSettings } from '../utils/kioskConfig.js';
 
 const RetakeIcon = () => (
   <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#6b7280" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ width: 18, height: 18 }}>
@@ -39,8 +39,11 @@ const DownloadIcon = () => (
 export default function CameraView({ filter, poseLimit = 5, onFinishSession }) {
   const videoRef = useRef(null);
   const streamRef = useRef(null);
+  const pickerVideoRefs = useRef({});
+  const pickerStreamsRef = useRef({});
   const [cameraSettings] = useState(() => getKioskSettings());
-  const [facingMode, setFacingMode] = useState(() => getKioskSettings().defaultCamera || 'user');
+  const [cameraProfiles] = useState(() => getCameraProfiles(getKioskSettings()));
+  const [activeCameraId, setActiveCameraId] = useState(() => getCameraProfiles(getKioskSettings())[0]?.id || 'camera-1');
   const [isReady, setIsReady] = useState(false);
   const [error, setError] = useState('');
 
@@ -52,6 +55,10 @@ export default function CameraView({ filter, poseLimit = 5, onFinishSession }) {
   const [viewingPhotoIndex, setViewingPhotoIndex] = useState(null);
   const [isPlayingVideo, setIsPlayingVideo] = useState(false);
   const [playbackFrameIdx, setPlaybackFrameIdx] = useState(0);
+  // Customer chooses an angle before the first shot and after each completed shot.
+  const [isCameraPickerOpen, setIsCameraPickerOpen] = useState(true);
+  const [cameraPreviewReady, setCameraPreviewReady] = useState({});
+  const activeCamera = cameraProfiles.find(profile => profile.id === activeCameraId) || cameraProfiles[0];
 
   useEffect(() => {
     let cancelled = false;
@@ -61,10 +68,13 @@ export default function CameraView({ filter, poseLimit = 5, onFinishSession }) {
       setError('');
       stopStream(streamRef.current);
 
+      // The selection screen manages its own preview streams.
+      if (isCameraPickerOpen) return;
+
       try {
         const stream = await getCameraStream({
-          facingMode,
-          deviceId: cameraSettings.cameraDeviceId,
+          facingMode: activeCamera?.facingMode || cameraSettings.defaultCamera || 'user',
+          deviceId: activeCamera?.deviceId,
         });
         if (cancelled) {
           stopStream(stream);
@@ -78,9 +88,9 @@ export default function CameraView({ filter, poseLimit = 5, onFinishSession }) {
           setIsReady(true);
         }
       } catch (cameraError) {
-        if (cameraSettings.cameraDeviceId) {
+        if (activeCamera?.deviceId) {
           try {
-            const fallbackStream = await getCameraStream(facingMode);
+            const fallbackStream = await getCameraStream(activeCamera?.facingMode || cameraSettings.defaultCamera || 'user');
             if (cancelled) {
               stopStream(fallbackStream);
               return;
@@ -108,7 +118,46 @@ export default function CameraView({ filter, poseLimit = 5, onFinishSession }) {
       cancelled = true;
       stopStream(streamRef.current);
     };
-  }, [facingMode, cameraSettings.cameraDeviceId]);
+  }, [activeCamera?.deviceId, activeCamera?.facingMode, cameraSettings.defaultCamera, isCameraPickerOpen]);
+
+  useEffect(() => {
+    if (!isCameraPickerOpen) return undefined;
+
+    let cancelled = false;
+    setCameraPreviewReady({});
+
+    const startPreviews = async () => {
+      await Promise.all(cameraProfiles.map(async (profile) => {
+        try {
+          const stream = await getCameraStream({
+            facingMode: profile.facingMode || 'user',
+            deviceId: profile.deviceId,
+          });
+          if (cancelled) {
+            stopStream(stream);
+            return;
+          }
+          pickerStreamsRef.current[profile.id] = stream;
+          const preview = pickerVideoRefs.current[profile.id];
+          if (preview) {
+            preview.srcObject = stream;
+            await preview.play();
+            if (!cancelled) setCameraPreviewReady(previous => ({ ...previous, [profile.id]: true }));
+          }
+        } catch (previewError) {
+          console.warn(`Kamera ${profile.name} tidak dapat dibuka.`, previewError);
+        }
+      }));
+    };
+
+    startPreviews();
+
+    return () => {
+      cancelled = true;
+      Object.values(pickerStreamsRef.current).forEach(stopStream);
+      pickerStreamsRef.current = {};
+    };
+  }, [cameraProfiles, isCameraPickerOpen]);
 
   const handleCaptureClick = () => {
     if (!videoRef.current || !isReady || isRecordingBurst || countdown !== null) return;
@@ -130,7 +179,7 @@ export default function CameraView({ filter, poseLimit = 5, onFinishSession }) {
     // Capture 8 frames at 150ms intervals (~1.2 seconds of animation)
     const interval = setInterval(() => {
       if (videoRef.current) {
-        burstFrames.push(captureVideoFrame(videoRef.current, { mirror: cameraSettings.mirrorCamera }));
+        burstFrames.push(captureVideoFrame(videoRef.current, { mirror: activeCamera?.mirror ?? cameraSettings.mirrorCamera }));
       }
       count++;
 
@@ -143,14 +192,18 @@ export default function CameraView({ filter, poseLimit = 5, onFinishSession }) {
             frames: burstFrames, // The GIF animation frames
             mediaWidth: videoRef.current?.videoWidth || 0,
             mediaHeight: videoRef.current?.videoHeight || 0,
+            cameraId: activeCamera?.id || 'camera-1',
+            cameraName: activeCamera?.name || 'Posisi Kamera 1',
           }];
+          if (newPhotos.length < poseLimit) setIsCameraPickerOpen(true);
           return newPhotos;
         });
 
         setIsRecordingBurst(false);
+        setIsAutoCapturing(false);
       }
     }, 150);
-  }, [isReady, cameraSettings.mirrorCamera, poseLimit, capturedPhotos.length, isRecordingBurst]);
+  }, [isReady, activeCamera?.id, activeCamera?.name, activeCamera?.mirror, cameraSettings.mirrorCamera, poseLimit, capturedPhotos.length, isRecordingBurst]);
 
   useEffect(() => {
     if (!isAutoCapturing) return;
@@ -220,7 +273,7 @@ export default function CameraView({ filter, poseLimit = 5, onFinishSession }) {
       <div style={{ position: 'relative', background: 'black', borderRadius: '16px', overflow: 'hidden', aspectRatio: '16/11', maxHeight: 'calc(100svh - 120px)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
         <video
           ref={videoRef}
-          className={cameraSettings.mirrorCamera ? 'is-mirrored' : ''}
+          className={(activeCamera?.mirror ?? cameraSettings.mirrorCamera) ? 'is-mirrored' : ''}
           playsInline
           muted
           style={{
@@ -250,7 +303,7 @@ export default function CameraView({ filter, poseLimit = 5, onFinishSession }) {
         {error && <div style={{ position: 'absolute', color: '#ef4444' }}>{error}</div>}
 
         {/* Center Capture Button */}
-        {isReady && capturedPhotos.length < poseLimit && !isAutoCapturing && (
+        {isReady && capturedPhotos.length < poseLimit && !isAutoCapturing && !isCameraPickerOpen && (
           <>
             <button
               onClick={handleCaptureClick}
@@ -419,6 +472,45 @@ export default function CameraView({ filter, poseLimit = 5, onFinishSession }) {
                 }}
               ></div>
             ))}
+          </div>
+        </div>
+      )}
+
+      {isCameraPickerOpen && capturedPhotos.length < poseLimit && (
+        <div style={{ position: 'fixed', inset: 0, zIndex: 110, overflowY: 'auto', background: '#fff' }}>
+          <div style={{ height: '66px', display: 'flex', alignItems: 'center', padding: '0 1.25rem', borderBottom: '1px solid #e5e7eb', boxShadow: '0 2px 5px rgba(0,0,0,.16)', background: 'white' }}>
+            <span style={{ display: 'inline-grid', width: '40px', height: '40px', marginRight: '0.5rem', placeItems: 'center', borderRadius: '12px', background: '#ff7414', color: 'white', fontSize: '1.25rem', fontWeight: 1000 }}>up</span>
+            <span style={{ color: '#ff7414', fontSize: '1.05rem', fontWeight: 1000, letterSpacing: '-.04em' }}>Urbanmenphoto</span>
+          </div>
+          <div style={{ padding: 'clamp(1.5rem, 4vh, 3rem) clamp(1rem, 5vw, 7rem) 3rem' }}>
+          <div style={{ width: '100%', maxWidth: '1600px', margin: '0 auto' }}>
+            <h1 style={{ margin: '0 0 clamp(2rem, 5vh, 4.5rem)', color: '#333', textAlign: 'center', fontSize: 'clamp(2rem, 3.1vw, 3.6rem)', fontWeight: 500, letterSpacing: '-0.04em' }}>PILIH KAMERA</h1>
+            <div style={{ display: 'grid', gridTemplateColumns: `repeat(${Math.min(cameraProfiles.length, 2)}, minmax(0, 1fr))`, gap: 'clamp(1rem, 2.2vw, 2.5rem)' }}>
+              {cameraProfiles.map(profile => (
+                <button
+                  key={profile.id}
+                  type="button"
+                  onClick={() => { setActiveCameraId(profile.id); setIsCameraPickerOpen(false); }}
+                  aria-label={`Pilih ${profile.name}`}
+                  style={{ position: 'relative', minHeight: 'min(58vh, 720px)', padding: 0, overflow: 'hidden', borderRadius: '20px', border: `2px solid ${profile.id === activeCameraId ? '#ff7414' : '#111'}`, background: '#000', color: 'white', cursor: 'pointer', boxShadow: profile.id === activeCameraId ? '0 0 0 4px rgba(255,116,20,.12)' : 'none' }}
+                >
+                  <video
+                    ref={(element) => { pickerVideoRefs.current[profile.id] = element; }}
+                    className={profile.mirror ? 'is-mirrored' : ''}
+                    autoPlay
+                    muted
+                    playsInline
+                    style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover' }}
+                  />
+                  <span style={{ position: 'absolute', top: '1.1rem', left: '1.1rem', zIndex: 1, minWidth: '240px', padding: '0.5rem 1rem', borderRadius: '999px', background: '#ff7414', color: 'white', fontSize: '0.9rem', fontWeight: 900, letterSpacing: '.08em', textTransform: 'uppercase' }}>{profile.name}</span>
+                  <span style={{ position: 'absolute', inset: 0, display: 'grid', placeItems: 'center', opacity: cameraPreviewReady[profile.id] ? 0 : 1, transition: 'opacity .2s' }}>
+                    <span style={{ display: 'grid', width: '110px', height: '110px', placeItems: 'center', borderRadius: '50%', background: '#8b8b8b', color: '#101010' }}><CameraIcon /></span>
+                  </span>
+                  <span style={{ position: 'absolute', right: 0, bottom: 0, left: 0, padding: '1.15rem', background: '#ff7414', color: 'white', fontSize: '0.95rem', fontWeight: 900, letterSpacing: '.08em', textTransform: 'uppercase' }}>{profile.name}</span>
+                </button>
+              ))}
+            </div>
+          </div>
           </div>
         </div>
       )}
