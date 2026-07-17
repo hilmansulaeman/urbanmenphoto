@@ -1,14 +1,40 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
+import { QRCodeSVG } from 'qrcode.react';
 import { logTransaction } from '../utils/transactionLogger.js';
 import { backendRequest, reportMonitoringError } from '../utils/backendApi.js';
 
 export default function PaymentView({ orderDetails, onPaymentSuccess, onBack, title = "PEMBAYARAN", description = "Scan QRIS di bawah ini menggunakan aplikasi e-wallet Anda", showFeatures = false }) {
   const [isSimulating, setIsSimulating] = useState(false);
   const [paymentError, setPaymentError] = useState('');
+  const [qrisCheckout, setQrisCheckout] = useState(null);
   const [customerEmail] = useState(orderDetails.email || orderDetails.backendSession?.email || '');
   const paymentMode = String(import.meta.env.VITE_PAYMENT_MODE || import.meta.env.VITE_MIDTRANS_ENVIRONMENT || 'sandbox').toLowerCase();
   const isDummyPayment = paymentMode === 'dummy';
   const normalizedEmail = customerEmail.trim().toLowerCase();
+  const currentTotal = orderDetails.totalPrice || 0;
+
+  useEffect(() => {
+    if (!qrisCheckout) return undefined;
+    let stopped = false;
+    const poll = async () => {
+      try {
+        const payment = await backendRequest(`/api/payments/${qrisCheckout.payment.id}`, null);
+        if (stopped) return;
+        if (payment.status === 'paid') {
+          logTransaction({ amount: currentTotal, packageName: qrisCheckout.pkgName, method: 'QRIS Midtrans', status: 'Success' });
+          onPaymentSuccess({ session: qrisCheckout.session, payment, midtransResult: { transaction_status: 'settlement', payment_type: 'qris' } });
+        } else if (['failed', 'expired', 'cancelled'].includes(payment.status)) {
+          setQrisCheckout(null);
+          setPaymentError('QRIS sudah tidak aktif. Buat pembayaran baru untuk mencoba lagi.');
+        }
+      } catch {
+        // Webhook can arrive a moment after the customer completes payment.
+      }
+    };
+    poll();
+    const timer = window.setInterval(poll, 3000);
+    return () => { stopped = true; window.clearInterval(timer); };
+  }, [qrisCheckout, currentTotal, onPaymentSuccess]);
 
   const loadMidtransSnap = () => new Promise((resolve, reject) => {
     if (window.snap) {
@@ -98,11 +124,17 @@ export default function PaymentView({ orderDetails, onPaymentSuccess, onBack, ti
         sessionToken: session.customerToken,
         body: JSON.stringify({
           sessionId: session.id,
-          provider: 'midtrans',
+          provider: 'midtrans-qris',
           amount: currentTotal,
           currency: 'IDR',
         }),
       });
+
+      if (payment.qrString) {
+        setQrisCheckout({ session, payment, pkgName });
+        setIsSimulating(false);
+        return;
+      }
 
       if (!payment.snapToken) {
         throw new Error('Backend tidak mengembalikan Midtrans Snap token.');
@@ -194,7 +226,21 @@ export default function PaymentView({ orderDetails, onPaymentSuccess, onBack, ti
     }
   };
 
-  const currentTotal = orderDetails.totalPrice || 0;
+  if (qrisCheckout) {
+    return (
+      <section className="wizard-step payment-step" aria-label="QRIS Payment">
+        <div className="payment-card" style={{ textAlign: 'center' }}>
+          <h2>Scan QRIS untuk Membayar</h2>
+          <p>Nominal: <strong>Rp {currentTotal.toLocaleString('id-ID')}</strong></p>
+          <div style={{ display: 'inline-flex', padding: '1rem', background: 'white', borderRadius: '14px', border: '1px solid #e5e7eb' }}>
+            <QRCodeSVG value={qrisCheckout.payment.qrString} size={260} level="M" includeMargin />
+          </div>
+          <p className="subtitle" style={{ marginTop: '1rem' }}>Menunggu pembayaran QRIS dikonfirmasi...</p>
+          <button className="payment-back-button" type="button" onClick={() => setQrisCheckout(null)}>Batalkan</button>
+        </div>
+      </section>
+    );
+  }
 
   if (isSimulating) {
     return (

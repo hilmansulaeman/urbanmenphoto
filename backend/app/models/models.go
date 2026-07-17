@@ -68,6 +68,7 @@ type Payment struct {
 	ProviderRef *string   `json:"providerRef,omitempty"`
 	SnapToken   *string   `json:"snapToken,omitempty"`
 	CheckoutURL *string   `json:"checkoutUrl,omitempty"`
+	QRString    *string   `json:"qrString,omitempty"`
 	CreatedAt   time.Time `json:"createdAt"`
 	UpdatedAt   time.Time `json:"updatedAt"`
 }
