@@ -7,6 +7,7 @@ export default function PaymentView({ orderDetails, onPaymentSuccess, onBack, ti
   const [isSimulating, setIsSimulating] = useState(false);
   const [paymentError, setPaymentError] = useState('');
   const [qrisCheckout, setQrisCheckout] = useState(null);
+  const [qrisNow, setQrisNow] = useState(Date.now());
   const [customerEmail] = useState(orderDetails.email || orderDetails.backendSession?.email || '');
   const paymentMode = String(import.meta.env.VITE_PAYMENT_MODE || import.meta.env.VITE_MIDTRANS_ENVIRONMENT || 'sandbox').toLowerCase();
   const isDummyPayment = paymentMode === 'dummy';
@@ -35,6 +36,12 @@ export default function PaymentView({ orderDetails, onPaymentSuccess, onBack, ti
     const timer = window.setInterval(poll, 3000);
     return () => { stopped = true; window.clearInterval(timer); };
   }, [qrisCheckout, currentTotal, onPaymentSuccess]);
+
+  useEffect(() => {
+    if (!qrisCheckout) return undefined;
+    const timer = window.setInterval(() => setQrisNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [qrisCheckout]);
 
   const loadMidtransSnap = () => new Promise((resolve, reject) => {
     if (window.snap) {
@@ -131,7 +138,7 @@ export default function PaymentView({ orderDetails, onPaymentSuccess, onBack, ti
       });
 
       if (payment.qrString) {
-        setQrisCheckout({ session, payment, pkgName });
+        setQrisCheckout({ session, payment, pkgName, expiresAt: Date.now() + (15 * 60 * 1000) });
         setIsSimulating(false);
         return;
       }
@@ -227,16 +234,25 @@ export default function PaymentView({ orderDetails, onPaymentSuccess, onBack, ti
   };
 
   if (qrisCheckout) {
+    const remainingSeconds = Math.max(0, Math.ceil((qrisCheckout.expiresAt - qrisNow) / 1000));
+    const remainingTime = `${String(Math.floor(remainingSeconds / 60)).padStart(2, '0')}:${String(remainingSeconds % 60).padStart(2, '0')}`;
     return (
-      <section className="wizard-step payment-step" aria-label="QRIS Payment">
-        <div className="payment-card" style={{ textAlign: 'center' }}>
-          <h2>Scan QRIS untuk Membayar</h2>
-          <p>Nominal: <strong>Rp {currentTotal.toLocaleString('id-ID')}</strong></p>
-          <div style={{ display: 'inline-flex', padding: '1rem', background: 'white', borderRadius: '14px', border: '1px solid #e5e7eb' }}>
-            <QRCodeSVG value={qrisCheckout.payment.qrString} size={260} level="M" includeMargin />
+      <section className="qris-checkout" aria-label="QRIS Payment">
+        <div className="qris-brand"><span className="qris-brand-mark">up</span>Urbanmenphoto</div>
+        <div className="qris-shell">
+          <div className="qris-main">
+            <div className="qris-kicker"><span className="qris-live-dot" /> QRIS DINAMIS</div>
+            <h1>Scan untuk<br />mulai sesi.</h1>
+            <p>Gunakan aplikasi bank atau e-wallet apa pun yang mendukung QRIS.</p>
+            <div className="qris-total"><span>Total pembayaran</span><strong>Rp {currentTotal.toLocaleString('id-ID')}</strong></div>
+            <div className="qris-status"><span className="qris-status-icon">⌁</span><span>Menunggu konfirmasi pembayaran secara realtime</span></div>
           </div>
-          <p className="subtitle" style={{ marginTop: '1rem' }}>Menunggu pembayaran QRIS dikonfirmasi...</p>
-          <button className="payment-back-button" type="button" onClick={() => setQrisCheckout(null)}>Batalkan</button>
+          <div className="qris-card">
+            <div className="qris-card-top"><span>QRIS</span><span>PEMBAYARAN AMAN</span></div>
+            <div className="qris-code-wrap"><QRCodeSVG value={qrisCheckout.payment.qrString} size={280} level="M" includeMargin /></div>
+            <div className="qris-card-bottom"><span>BERLAKU SELAMA</span><strong>{remainingTime}</strong></div>
+            <button className="qris-cancel" type="button" onClick={() => setQrisCheckout(null)}>Batalkan pembayaran</button>
+          </div>
         </div>
       </section>
     );
