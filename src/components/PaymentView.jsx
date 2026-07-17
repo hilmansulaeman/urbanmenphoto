@@ -137,7 +137,7 @@ export default function PaymentView({ orderDetails, onPaymentSuccess, onBack, ti
         }),
       });
 
-      if (payment.qrString || payment.qrImageData) {
+      if (payment.qrString || payment.qrImageData || payment.checkoutUrl) {
         setQrisCheckout({ session, payment, pkgName, expiresAt: Date.now() + (15 * 60 * 1000) });
         setIsSimulating(false);
         return;
@@ -250,8 +250,8 @@ export default function PaymentView({ orderDetails, onPaymentSuccess, onBack, ti
           <div className="qris-card">
             <div className="qris-card-top"><span>QRIS</span><span>PEMBAYARAN AMAN</span></div>
             <div className="qris-code-wrap">
-              {qrisCheckout.payment.qrImageData ? (
-                <img src={qrisCheckout.payment.qrImageData} alt="QRIS pembayaran" />
+              {qrisCheckout.payment.qrImageData || qrisCheckout.payment.checkoutUrl ? (
+                <img src={qrisCheckout.payment.qrImageData || qrisCheckout.payment.checkoutUrl} alt="QRIS pembayaran" />
               ) : (
                 <QRCodeSVG value={qrisCheckout.payment.qrString} size={280} level="M" includeMargin />
               )}

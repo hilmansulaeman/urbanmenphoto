@@ -904,6 +904,11 @@ func (s *Server) handlePayments(w http.ResponseWriter, r *http.Request) {
 	if provider == "midtrans-qris" {
 		qrString, qrImageData, qrURL, err := s.createMidtransQRIS(payment, session)
 		if err != nil {
+			s.recordMonitoringError(r, "payment", payment.ID, "Failed to create Midtrans QRIS transaction.", map[string]any{
+				"error":     err.Error(),
+				"sessionId": payment.SessionID,
+				"amount":    payment.Amount,
+			})
 			writeError(w, http.StatusBadGateway, err.Error())
 			return
 		}
@@ -1808,9 +1813,12 @@ func (s *Server) createMidtransQRIS(payment models.Payment, session models.Sessi
 	}
 	qrURL := ""
 	for _, action := range response.Actions {
-		if action.Name == "generate-qr-code" {
+		if action.Name == "generate-qr-code-v2" && action.URL != "" {
 			qrURL = action.URL
 			break
+		}
+		if action.Name == "generate-qr-code" && action.URL != "" && qrURL == "" {
+			qrURL = action.URL
 		}
 	}
 	if response.QRString != "" {
@@ -1819,28 +1827,10 @@ func (s *Server) createMidtransQRIS(payment models.Payment, session models.Sessi
 	if qrURL == "" {
 		return "", "", "", errors.New("Midtrans QRIS response does not include a QR code action.")
 	}
-	imageRequest, err := http.NewRequest(http.MethodGet, qrURL, nil)
-	if err != nil {
-		return "", "", "", err
-	}
-	imageRequest.SetBasicAuth(strings.TrimSpace(s.cfg.MidtransServerKey), "")
-	imageResponse, err := http.DefaultClient.Do(imageRequest)
-	if err != nil {
-		return "", "", "", err
-	}
-	defer imageResponse.Body.Close()
-	imageBytes, err := io.ReadAll(io.LimitReader(imageResponse.Body, 2*1024*1024))
-	if err != nil {
-		return "", "", "", err
-	}
-	if imageResponse.StatusCode < 200 || imageResponse.StatusCode >= 300 {
-		return "", "", "", fmt.Errorf("Midtrans QR image returned %d", imageResponse.StatusCode)
-	}
-	contentType := imageResponse.Header.Get("Content-Type")
-	if !strings.HasPrefix(contentType, "image/") {
-		contentType = "image/png"
-	}
-	return "", "data:" + contentType + ";base64," + base64.StdEncoding.EncodeToString(imageBytes), qrURL, nil
+	// Midtrans explicitly supports displaying this transaction-specific action
+	// URL in an <img>. This avoids a second server-to-server request that can
+	// fail in a serverless runtime while creating an otherwise valid QRIS charge.
+	return "", "", qrURL, nil
 }
 
 func (s *Server) verifyPaymentWebhook(r *http.Request, body models.PaymentWebhookRequest) error {
