@@ -137,7 +137,7 @@ export default function PaymentView({ orderDetails, onPaymentSuccess, onBack, ti
         }),
       });
 
-      if (payment.qrString) {
+      if (payment.qrString || payment.qrImageData) {
         setQrisCheckout({ session, payment, pkgName, expiresAt: Date.now() + (15 * 60 * 1000) });
         setIsSimulating(false);
         return;
@@ -249,7 +249,13 @@ export default function PaymentView({ orderDetails, onPaymentSuccess, onBack, ti
           </div>
           <div className="qris-card">
             <div className="qris-card-top"><span>QRIS</span><span>PEMBAYARAN AMAN</span></div>
-            <div className="qris-code-wrap"><QRCodeSVG value={qrisCheckout.payment.qrString} size={280} level="M" includeMargin /></div>
+            <div className="qris-code-wrap">
+              {qrisCheckout.payment.qrImageData ? (
+                <img src={qrisCheckout.payment.qrImageData} alt="QRIS pembayaran" />
+              ) : (
+                <QRCodeSVG value={qrisCheckout.payment.qrString} size={280} level="M" includeMargin />
+              )}
+            </div>
             <div className="qris-card-bottom"><span>BERLAKU SELAMA</span><strong>{remainingTime}</strong></div>
             <button className="qris-cancel" type="button" onClick={() => setQrisCheckout(null)}>Batalkan pembayaran</button>
           </div>

@@ -1329,6 +1329,7 @@ button {
 .qris-card-top { color: #111827; font-weight: 950; letter-spacing: -.05em; font-size: 1.65rem; }
 .qris-card-top span:last-child { color: #8b94a3; font-size: .63rem; letter-spacing: .1em; }
 .qris-code-wrap { display: inline-flex; margin: 1.4rem 0; padding: .9rem; border: 1px solid #e8ebf0; border-radius: 18px; background: white; }
+.qris-code-wrap img { width: 280px; height: 280px; object-fit: contain; }
 .qris-card-bottom { padding: 1rem; border-radius: 13px; background: #fff2e9; color: #8b3a12; }
 .qris-card-bottom span { font-size: .66rem; font-weight: 900; letter-spacing: .1em; }
 .qris-card-bottom strong { font-size: 1.3rem; letter-spacing: .04em; }
@@ -1338,7 +1339,7 @@ button {
   .qris-checkout { padding: 1.25rem; }
   .qris-shell { grid-template-columns: 1fr; margin-top: 3rem; gap: 2.25rem; }
   .qris-main h1 { font-size: 3.4rem; }
-  .qris-code-wrap svg { width: min(66vw, 280px); height: min(66vw, 280px); }
+  .qris-code-wrap svg, .qris-code-wrap img { width: min(66vw, 280px); height: min(66vw, 280px); }
 }
 
 @media (max-width: 760px) {

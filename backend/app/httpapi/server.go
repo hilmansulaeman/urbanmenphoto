@@ -902,14 +902,19 @@ func (s *Server) handlePayments(w http.ResponseWriter, r *http.Request) {
 		payment.CheckoutURL = &checkoutURL
 	}
 	if provider == "midtrans-qris" {
-		qrString, qrURL, err := s.createMidtransQRIS(payment, session)
+		qrString, qrImageData, qrURL, err := s.createMidtransQRIS(payment, session)
 		if err != nil {
 			writeError(w, http.StatusBadGateway, err.Error())
 			return
 		}
 		payment.ProviderRef = &payment.ID
 		payment.CheckoutURL = &qrURL
-		payment.QRString = &qrString
+		if qrString != "" {
+			payment.QRString = &qrString
+		}
+		if qrImageData != "" {
+			payment.QRImageData = &qrImageData
+		}
 	}
 	if err := s.store.InsertPayment(payment); err != nil {
 		s.recordMonitoringError(r, "payment", payment.ID, "Failed to save payment.", map[string]any{
@@ -1755,43 +1760,87 @@ func (s *Server) createMidtransSnap(_ *http.Request, payment models.Payment, ses
 	return snapResponse.Token, snapResponse.RedirectURL, nil
 }
 
-func (s *Server) createMidtransQRIS(payment models.Payment, session models.Session) (string, string, error) {
+func (s *Server) createMidtransQRIS(payment models.Payment, session models.Session) (string, string, string, error) {
 	if strings.TrimSpace(s.cfg.MidtransServerKey) == "" {
-		return "", "", errors.New("Midtrans server key is not configured.")
+		return "", "", "", errors.New("Midtrans server key is not configured.")
 	}
 	endpoint := "https://api.sandbox.midtrans.com/v2/charge"
 	if strings.EqualFold(strings.TrimSpace(s.cfg.MidtransEnvironment), "production") {
 		endpoint = "https://api.midtrans.com/v2/charge"
 	}
 	payload := map[string]any{
-		"payment_type": "qris",
+		"payment_type":        "qris",
 		"transaction_details": map[string]any{"order_id": payment.ID, "gross_amount": payment.Amount},
-		"item_details": []map[string]any{{"id": "photobooth-session", "price": payment.Amount, "quantity": 1, "name": "Urbanmenphoto Photobooth"}},
-		"qris": map[string]any{"acquirer": "gopay"},
+		"item_details":        []map[string]any{{"id": "photobooth-session", "price": payment.Amount, "quantity": 1, "name": "Urbanmenphoto Photobooth"}},
+		"qris":                map[string]any{"acquirer": "gopay"},
 	}
 	if session.Email != nil && *session.Email != "" {
 		payload["customer_details"] = map[string]any{"email": *session.Email}
 	}
 	body, err := json.Marshal(payload)
-	if err != nil { return "", "", err }
+	if err != nil {
+		return "", "", "", err
+	}
 	req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(body))
-	if err != nil { return "", "", err }
+	if err != nil {
+		return "", "", "", err
+	}
 	req.Header.Set("Content-Type", "application/json")
 	req.SetBasicAuth(strings.TrimSpace(s.cfg.MidtransServerKey), "")
 	res, err := http.DefaultClient.Do(req)
-	if err != nil { return "", "", err }
+	if err != nil {
+		return "", "", "", err
+	}
 	defer res.Body.Close()
 	var response struct {
 		StatusMessage string `json:"status_message"`
-		QRString string `json:"qr_string"`
-		Actions []struct { Name string `json:"name"`; URL string `json:"url"` } `json:"actions"`
+		QRString      string `json:"qr_string"`
+		Actions       []struct {
+			Name string `json:"name"`
+			URL  string `json:"url"`
+		} `json:"actions"`
 	}
-	if err := json.NewDecoder(res.Body).Decode(&response); err != nil { return "", "", err }
-	if res.StatusCode < 200 || res.StatusCode >= 300 { return "", "", fmt.Errorf("Midtrans QRIS returned %d: %s", res.StatusCode, response.StatusMessage) }
-	if response.QRString == "" { return "", "", errors.New("Midtrans QRIS response does not include qr string.") }
+	if err := json.NewDecoder(res.Body).Decode(&response); err != nil {
+		return "", "", "", err
+	}
+	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		return "", "", "", fmt.Errorf("Midtrans QRIS returned %d: %s", res.StatusCode, response.StatusMessage)
+	}
 	qrURL := ""
-	for _, action := range response.Actions { if action.Name == "generate-qr-code" { qrURL = action.URL; break } }
-	return response.QRString, qrURL, nil
+	for _, action := range response.Actions {
+		if action.Name == "generate-qr-code" {
+			qrURL = action.URL
+			break
+		}
+	}
+	if response.QRString != "" {
+		return response.QRString, "", qrURL, nil
+	}
+	if qrURL == "" {
+		return "", "", "", errors.New("Midtrans QRIS response does not include a QR code action.")
+	}
+	imageRequest, err := http.NewRequest(http.MethodGet, qrURL, nil)
+	if err != nil {
+		return "", "", "", err
+	}
+	imageRequest.SetBasicAuth(strings.TrimSpace(s.cfg.MidtransServerKey), "")
+	imageResponse, err := http.DefaultClient.Do(imageRequest)
+	if err != nil {
+		return "", "", "", err
+	}
+	defer imageResponse.Body.Close()
+	imageBytes, err := io.ReadAll(io.LimitReader(imageResponse.Body, 2*1024*1024))
+	if err != nil {
+		return "", "", "", err
+	}
+	if imageResponse.StatusCode < 200 || imageResponse.StatusCode >= 300 {
+		return "", "", "", fmt.Errorf("Midtrans QR image returned %d", imageResponse.StatusCode)
+	}
+	contentType := imageResponse.Header.Get("Content-Type")
+	if !strings.HasPrefix(contentType, "image/") {
+		contentType = "image/png"
+	}
+	return "", "data:" + contentType + ";base64," + base64.StdEncoding.EncodeToString(imageBytes), qrURL, nil
 }
 
 func (s *Server) verifyPaymentWebhook(r *http.Request, body models.PaymentWebhookRequest) error {
