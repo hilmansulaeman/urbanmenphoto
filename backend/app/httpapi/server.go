@@ -160,12 +160,19 @@ func (s *Server) allowedOrigin(origin string) bool {
 }
 
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != "/" {
-		writeError(w, http.StatusNotFound, "Route not found.")
-		return
-	}
 	if r.Method != http.MethodGet {
 		writeError(w, http.StatusMethodNotAllowed, "Method not allowed.")
+		return
+	}
+
+	// The kiosk runs this API on the same computer that owns the DSLR. When a
+	// frontend build is present, serve it from this process so the browser and
+	// gphoto2 backend share one local origin (http://localhost:8787).
+	if s.serveKioskFrontend(w, r) {
+		return
+	}
+	if r.URL.Path != "/" {
+		writeError(w, http.StatusNotFound, "Route not found.")
 		return
 	}
 
@@ -1910,6 +1917,36 @@ func (s *Server) insertPaymentLog(r *http.Request, event string, payment models.
 		UserAgent:      r.UserAgent(),
 		CreatedAt:      time.Now(),
 	})
+}
+
+func (s *Server) serveKioskFrontend(w http.ResponseWriter, r *http.Request) bool {
+	distDir := strings.TrimSpace(s.cfg.FrontendDistDir)
+	if distDir == "" {
+		return false
+	}
+	indexPath := filepath.Join(distDir, "index.html")
+	if info, err := os.Stat(indexPath); err != nil || info.IsDir() {
+		return false
+	}
+
+	relativePath := strings.TrimPrefix(filepath.Clean(r.URL.Path), "/")
+	if relativePath == "." || relativePath == "" {
+		http.ServeFile(w, r, indexPath)
+		return true
+	}
+	if strings.HasPrefix(relativePath, "..") {
+		writeError(w, http.StatusBadRequest, "Invalid file path.")
+		return true
+	}
+	filePath := filepath.Join(distDir, relativePath)
+	if info, err := os.Stat(filePath); err == nil && !info.IsDir() {
+		http.ServeFile(w, r, filePath)
+		return true
+	}
+
+	// SPA routes such as /admin and /gallery/:id must load the Vite entrypoint.
+	http.ServeFile(w, r, indexPath)
+	return true
 }
 
 func (s *Server) upsertFrame(w http.ResponseWriter, r *http.Request, frameID string, actorID *string) {

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -18,6 +19,28 @@ import (
 
 const tinyPNGDataURL = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
 const tinyGIFDataURL = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw=="
+
+func TestKioskFrontendServesSPAAndAssets(t *testing.T) {
+	distDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(distDir, "assets"), 0755); err != nil {
+		t.Fatalf("create assets directory: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(distDir, "index.html"), []byte("<main>kiosk</main>"), 0644); err != nil {
+		t.Fatalf("write index: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(distDir, "assets", "app.js"), []byte("console.log('kiosk')"), 0644); err != nil {
+		t.Fatalf("write asset: %v", err)
+	}
+
+	handler := NewServer(config.Config{FrontendDistDir: distDir}, nil).Routes()
+	for _, path := range []string{"/", "/admin", "/assets/app.js"} {
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected %s to be served, got %d: %s", path, rec.Code, rec.Body.String())
+		}
+	}
+}
 
 func newTestServer(t *testing.T) http.Handler {
 	t.Helper()

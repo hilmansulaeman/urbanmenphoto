@@ -19,6 +19,7 @@ type Config struct {
 	DatabaseURL          string
 	DataDir              string
 	StorageDir           string
+	FrontendDistDir      string
 	BootstrapAdminEmail  string
 	BootstrapAdminPass   string
 	SMTPHost             string
@@ -53,6 +54,7 @@ func Load() Config {
 		DatabaseURL:          os.Getenv("DATABASE_URL"),
 		DataDir:              getEnv("BACKEND_DATA_DIR", defaultDataDir),
 		StorageDir:           getEnv("BACKEND_STORAGE_DIR", defaultStorageDir),
+		FrontendDistDir:      getEnv("FRONTEND_DIST_DIR", defaultFrontendDistDir()),
 		BootstrapAdminEmail:  strings.ToLower(strings.TrimSpace(os.Getenv("BOOTSTRAP_ADMIN_EMAIL"))),
 		BootstrapAdminPass:   os.Getenv("BOOTSTRAP_ADMIN_PASSWORD"),
 		SMTPHost:             os.Getenv("SMTP_HOST"),
@@ -65,6 +67,14 @@ func Load() Config {
 		MaxBodyBytes:         int64(getEnvInt("MAX_BODY_BYTES", 40*1024*1024)),
 		CleanupIntervalMins:  getEnvIntAllowZero("CLEANUP_INTERVAL_MINUTES", 60),
 	}
+}
+
+func defaultFrontendDistDir() string {
+	cwd, err := os.Getwd()
+	if err == nil && strings.EqualFold(filepath.Base(cwd), "backend") {
+		return filepath.Join("..", "dist")
+	}
+	return "dist"
 }
 
 func splitCSV(value string) []string {

@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite --host",
     "backend:dev": "cd backend && go run ./cmd/api",
+    "kiosk:start": "npm run build && cd backend && go run ./cmd/api",
     "backend:admin": "cd backend && go run ./cmd/admin",
     "build": "vite build",
     "preview": "vite preview",
