@@ -7,6 +7,7 @@ import { fetchCustomFrames, setCustomFrameDisabled, validateFrameConfig } from '
 import { FRAMES } from '../utils/photoConfig.js';
 import { BACKEND_API_URL, backendRequest, formatCurrency, formatDateTime, getBackendApiUrl, reportMonitoringError } from '../utils/backendApi.js';
 import { getCameraStream, getCameraStreamForProfile, listVideoDevices, stopStream } from '../utils/camera.js';
+import { captureDslrPhoto, listDslrCameras } from '../utils/dslr.js';
 import { clearRecoveryHistory, getRecoveryHistory, getRecoverySession, removeRecoverySession, saveRecoverySession } from '../utils/sessionRecovery.js';
 
 const ADMIN_TOKEN_KEY = 'urbanmenphoto_admin_token';
@@ -105,11 +106,15 @@ const MENU_ITEMS = [
 
 const STAFF_ALLOWED_MENUS = new Set(['booth_health', 'monitoring', 'recovery', 'gallery', 'reports', 'statistic', 'transaction', 'payments', 'messages', 'frame_photo']);
 
-const csvEscape = (value) => {
+const spreadsheetEscape = (value) => {
   if (value == null) return '';
   if (value instanceof Date) return value.toISOString();
   const normalized = typeof value === 'object' ? JSON.stringify(value) : String(value);
-  return `"${normalized.replace(/"/g, '""')}"`;
+  return normalized
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
 };
 
 const getNestedValue = (row, path) => {
@@ -117,22 +122,37 @@ const getNestedValue = (row, path) => {
   return String(path).split('.').reduce((value, key) => value?.[key], row);
 };
 
-const buildCSV = (rows = [], columns = []) => {
-  const headers = columns.map(column => csvEscape(column.label || column.key)).join(',');
-  const body = rows.map(row => columns.map(column => {
+const buildSpreadsheetHTML = (rows = [], columns = []) => {
+  const headers = columns.map(column => `<th>${spreadsheetEscape(column.label || column.key)}</th>`).join('');
+  const body = rows.map(row => `<tr>${columns.map(column => {
     const value = column.value ? column.value(row) : getNestedValue(row, column.key);
-    return csvEscape(value);
-  }).join(','));
-  return [headers, ...body].join('\n');
+    return `<td>${spreadsheetEscape(value)}</td>`;
+  }).join('')}</tr>`).join('');
+  return `<!doctype html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+  </head>
+  <body>
+    <table border="1">
+      <thead><tr>${headers}</tr></thead>
+      <tbody>${body}</tbody>
+    </table>
+  </body>
+</html>`;
 };
 
-const downloadCSV = (filename, rows = [], columns = []) => {
-  const csv = buildCSV(rows, columns);
-  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+const toSpreadsheetFilename = (filename = 'urbanmenphoto_report.xls') => (
+  String(filename).replace(/\.(csv|xlsx?)$/i, '') + '.xls'
+);
+
+const downloadSpreadsheet = (filename, rows = [], columns = []) => {
+  const html = buildSpreadsheetHTML(rows, columns);
+  const blob = new Blob([html], { type: 'application/vnd.ms-excel;charset=utf-8;' });
   const url = URL.createObjectURL(blob);
   const link = document.createElement('a');
   link.href = url;
-  link.download = filename;
+  link.download = toSpreadsheetFilename(filename);
   document.body.appendChild(link);
   link.click();
   document.body.removeChild(link);
@@ -380,6 +400,7 @@ function KioskSettingsTab() {
   const [settings, setSettings] = useState(getKioskSettings());
   const [savedMessage, setSavedMessage] = useState('');
   const [cameraDevices, setCameraDevices] = useState([]);
+  const [dslrCameras, setDslrCameras] = useState([]);
   const [cameraMessage, setCameraMessage] = useState('');
   const [isLoadingCameras, setIsLoadingCameras] = useState(false);
   const [isTestingCamera, setIsTestingCamera] = useState(false);
@@ -387,6 +408,7 @@ function KioskSettingsTab() {
   const [isTestPrintActive, setIsTestPrintActive] = useState(false);
   const previewVideoRef = useRef(null);
   const previewStreamRef = useRef(null);
+  const [previewImage, setPreviewImage] = useState('');
 
   useEffect(() => () => stopStream(previewStreamRef.current), []);
 
@@ -406,19 +428,23 @@ function KioskSettingsTab() {
     setCameraMessage('');
     try {
       let permissionStream = null;
-      if (requestPermission) {
-        permissionStream = await getCameraStream('user');
+      let webcamCount = 0;
+      try {
+        if (requestPermission) permissionStream = await getCameraStream('user');
+        const devices = await listVideoDevices();
+        setCameraDevices(devices);
+        webcamCount = devices.length;
+        stopStream(permissionStream);
+      } catch (webcamError) {
+        stopStream(permissionStream);
+        setCameraDevices([]);
       }
-      const devices = await listVideoDevices();
-      stopStream(permissionStream);
-      setCameraDevices(devices);
-      if (!devices.length) {
-        setCameraMessage('Tidak ada kamera yang terdeteksi.');
-      } else {
-        setCameraMessage(`${devices.length} kamera terdeteksi.`);
-      }
+      const dslrs = await listDslrCameras();
+      setDslrCameras(dslrs);
+      setCameraMessage(`${webcamCount} webcam dan ${dslrs.length} DSLR tethering terdeteksi.`);
     } catch (err) {
-      setCameraMessage(err.message || 'Gagal membaca daftar kamera.');
+      setDslrCameras([]);
+      setCameraMessage(err.message || 'Gagal membaca perangkat DSLR. Pastikan gphoto2 sudah terpasang.');
     } finally {
       setIsLoadingCameras(false);
     }
@@ -443,6 +469,12 @@ function KioskSettingsTab() {
 
   const getCameraProfileStatus = (profile) => {
     if (!profile.enabled) return { text: 'Nonaktif', color: '#6b7280', background: '#f3f4f6' };
+    if (profile.captureMode === 'dslr') {
+      if (!profile.tetherPort) return { text: 'Pilih port DSLR', color: '#92400e', background: '#fef3c7' };
+      return dslrCameras.some(camera => camera.port === profile.tetherPort)
+        ? { text: 'DSLR terdeteksi dan siap memotret', color: '#166534', background: '#dcfce7' }
+        : { text: 'DSLR tidak terdeteksi', color: '#991b1b', background: '#fee2e2' };
+    }
     if (!profile.deviceId) return { text: 'Belum memilih perangkat', color: '#92400e', background: '#fef3c7' };
     if (cameraDevices.some(device => device.deviceId === profile.deviceId)) return { text: 'Terdeteksi dan siap diuji', color: '#166534', background: '#dcfce7' };
     if (profile.deviceLabel && cameraDevices.some(device => device.label === profile.deviceLabel)) return { text: 'Perangkat ada, ID berubah — test untuk sinkronkan', color: '#92400e', background: '#fef3c7' };
@@ -452,10 +484,18 @@ function KioskSettingsTab() {
   const handleTestCamera = async (cameraId) => {
     setIsTestingCamera(true);
     setCameraMessage('');
+    setPreviewImage('');
     stopStream(previewStreamRef.current);
     try {
       const cameraProfile = settings.cameraProfiles?.find(profile => profile.id === cameraId) || settings.cameraProfiles?.[0];
       setPreviewCameraId(cameraProfile?.id || '');
+      if (cameraProfile?.captureMode === 'dslr') {
+        if (!cameraProfile.tetherPort) throw new Error('Pilih port DSLR terlebih dahulu.');
+        const result = await captureDslrPhoto(cameraProfile.tetherPort);
+        setPreviewImage(result.url);
+        setCameraMessage(`Foto test ${cameraProfile.name || 'DSLR'} berhasil diambil.`);
+        return;
+      }
       const resolved = await getCameraStreamForProfile(cameraProfile, settings.defaultCamera || 'user');
       const { stream } = resolved;
       previewStreamRef.current = stream;
@@ -485,6 +525,7 @@ function KioskSettingsTab() {
     if (previewVideoRef.current) {
       previewVideoRef.current.srcObject = null;
     }
+    setPreviewImage('');
     setCameraMessage('Preview kamera dihentikan.');
   };
 
@@ -779,17 +820,23 @@ function KioskSettingsTab() {
                   placeholder={`Posisi Kamera ${index + 1}`}
                   style={{ width: '100%', boxSizing: 'border-box', marginBottom: '0.6rem', padding: '0.7rem', borderRadius: '8px', border: '1px solid #ced4da' }}
                 />
-                <select
-                  value={profile.deviceId || ''}
-                  onChange={(event) => {
-                    const device = cameraDevices.find(item => item.deviceId === event.target.value);
-                    updateCameraProfile(profile.id, { deviceId: event.target.value, deviceLabel: device?.label || '' });
-                  }}
+                <select value={profile.captureMode || 'webcam'} onChange={(event) => updateCameraProfile(profile.id, { captureMode: event.target.value })}
                   style={{ width: '100%', padding: '0.7rem', borderRadius: '8px', border: '1px solid #ced4da', background: 'white' }}
                 >
-                  <option value="">{index === 0 ? 'Auto / Browser Default' : 'Pilih perangkat Kamera 2'}</option>
-                  {cameraDevices.map((device, deviceIndex) => <option key={device.deviceId || deviceIndex} value={device.deviceId}>{device.label || `Camera ${deviceIndex + 1}`}</option>)}
+                  <option value="webcam">Webcam / Capture Card</option>
+                  <option value="dslr">DSLR Tethering (USB)</option>
                 </select>
+                {profile.captureMode === 'dslr' ? (
+                  <select value={profile.tetherPort || ''} onChange={(event) => updateCameraProfile(profile.id, { tetherPort: event.target.value })} style={{ width: '100%', marginTop: '0.6rem', padding: '0.7rem', borderRadius: '8px', border: '1px solid #ced4da', background: 'white' }}>
+                    <option value="">Pilih DSLR tethering</option>
+                    {dslrCameras.map(camera => <option key={camera.port} value={camera.port}>{camera.model} — {camera.port}</option>)}
+                  </select>
+                ) : (
+                  <select value={profile.deviceId || ''} onChange={(event) => { const device = cameraDevices.find(item => item.deviceId === event.target.value); updateCameraProfile(profile.id, { deviceId: event.target.value, deviceLabel: device?.label || '' }); }} style={{ width: '100%', marginTop: '0.6rem', padding: '0.7rem', borderRadius: '8px', border: '1px solid #ced4da', background: 'white' }}>
+                    <option value="">{index === 0 ? 'Auto / Browser Default' : 'Pilih perangkat Kamera 2'}</option>
+                    {cameraDevices.map((device, deviceIndex) => <option key={device.deviceId || deviceIndex} value={device.deviceId}>{device.label || `Camera ${deviceIndex + 1}`}</option>)}
+                  </select>
+                )}
                 {(() => {
                   const status = getCameraProfileStatus(profile);
                   return <div style={{ marginTop: '0.6rem', padding: '0.45rem 0.6rem', borderRadius: '7px', color: status.color, background: status.background, fontSize: '0.78rem', fontWeight: 800 }}>{status.text}</div>;
@@ -809,13 +856,13 @@ function KioskSettingsTab() {
 
           <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 180px', gap: '1rem', alignItems: 'stretch' }}>
             <div style={{ background: '#111827', borderRadius: '12px', minHeight: '180px', overflow: 'hidden', display: 'grid', placeItems: 'center', border: '1px solid #1f2937' }}>
-              <video
+              {previewImage ? <img src={previewImage} alt="Hasil foto DSLR" style={{ width: '100%', height: '100%', minHeight: '180px', objectFit: 'contain', display: 'block' }} /> : <video
                 ref={previewVideoRef}
                 muted
                 playsInline
                 className={settings.cameraProfiles?.find(profile => profile.id === previewCameraId)?.mirror ? 'is-mirrored' : ''}
                 style={{ width: '100%', height: '100%', minHeight: '180px', objectFit: 'cover', display: 'block' }}
-              />
+              />}
             </div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: '0.65rem' }}>
               {(settings.cameraProfiles || []).filter(profile => profile.enabled).map((profile, index) => (
@@ -2855,33 +2902,23 @@ function TransactionTab({ adminToken }) {
     }
   };
 
-  const exportPaymentLogsToCSV = () => {
+  const exportPaymentLogsToXLS = () => {
     if (paymentLogs.length === 0) {
       alert('Tidak ada payment log untuk diekspor.');
       return;
     }
-    const headers = ['Payment ID', 'Session ID', 'Event', 'Provider', 'Amount', 'Currency', 'Status Before', 'Status After', 'IP', 'Created At'];
-    const rows = paymentLogs.map(log => [
-      log.paymentId,
-      log.sessionId,
-      log.event,
-      log.provider,
-      log.amount,
-      log.currency,
-      log.statusBefore || '',
-      log.statusAfter,
-      log.ip,
-      formatDateTime(log.createdAt),
-    ].map(value => `"${String(value ?? '').replace(/"/g, '""')}"`).join(','));
-    const blob = new Blob([[headers.join(','), ...rows].join('\n')], { type: 'text/csv;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `urbanmenphoto_payment_logs_${new Date().toISOString().split('T')[0]}.csv`;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    URL.revokeObjectURL(url);
+    downloadSpreadsheet(`urbanmenphoto_payment_logs_${new Date().toISOString().split('T')[0]}.xls`, paymentLogs, [
+      { key: 'paymentId', label: 'Payment ID' },
+      { key: 'sessionId', label: 'Session ID' },
+      { key: 'event', label: 'Event' },
+      { key: 'provider', label: 'Provider' },
+      { key: 'amount', label: 'Amount' },
+      { key: 'currency', label: 'Currency' },
+      { key: 'statusBefore', label: 'Status Before', value: row => row.statusBefore || '' },
+      { key: 'statusAfter', label: 'Status After' },
+      { key: 'ip', label: 'IP' },
+      { key: 'createdAt', label: 'Created At', value: row => formatDateTime(row.createdAt) },
+    ]);
   };
 
   return (
@@ -2897,8 +2934,8 @@ function TransactionTab({ adminToken }) {
           <button onClick={loadPaymentLogs} style={{ padding: '0.6rem 1rem', background: '#f8f9fa', color: '#111', border: '1px solid #e9ecef', borderRadius: '6px', cursor: 'pointer', fontWeight: 'bold' }}>
             Refresh
           </button>
-          <button onClick={exportPaymentLogsToCSV} style={{ padding: '0.6rem 1rem', background: '#f97316', color: 'white', border: 'none', borderRadius: '6px', cursor: 'pointer', fontWeight: 'bold' }}>
-            ↓ Export CSV
+          <button onClick={exportPaymentLogsToXLS} style={{ padding: '0.6rem 1rem', background: '#f97316', color: 'white', border: 'none', borderRadius: '6px', cursor: 'pointer', fontWeight: 'bold' }}>
+            ↓ Export XLS
           </button>
           <button onClick={handleClear} style={{ display: 'none', padding: '0.6rem 1rem', background: '#fee2e2', color: '#ef4444', border: 'none', borderRadius: '6px', cursor: 'pointer', fontWeight: 'bold' }}>
             Clear Logs
@@ -3128,7 +3165,7 @@ function ReportExportTab({ adminToken, adminUser }) {
       title: 'Customer Gallery / Session Logs',
       description: 'Semua sesi customer, link gallery, media final, GIF, dan jumlah original snaps.',
       endpoint: '/api/admin/sessions',
-      filename: `urbanmenphoto_sessions_${reportDateStamp()}.csv`,
+      filename: `urbanmenphoto_sessions_${reportDateStamp()}.xls`,
       columns: SESSION_EXPORT_COLUMNS,
     },
     {
@@ -3136,7 +3173,7 @@ function ReportExportTab({ adminToken, adminUser }) {
       title: 'Transactions',
       description: 'Rekap transaksi dari data payment utama.',
       endpoint: '/api/admin/transactions',
-      filename: `urbanmenphoto_transactions_${reportDateStamp()}.csv`,
+      filename: `urbanmenphoto_transactions_${reportDateStamp()}.xls`,
       columns: TRANSACTION_EXPORT_COLUMNS,
     },
     {
@@ -3144,7 +3181,7 @@ function ReportExportTab({ adminToken, adminUser }) {
       title: 'Payment Logs',
       description: 'Riwayat event payment, perubahan status, IP, dan provider reference.',
       endpoint: '/api/admin/payment-logs',
-      filename: `urbanmenphoto_payment_logs_${reportDateStamp()}.csv`,
+      filename: `urbanmenphoto_payment_logs_${reportDateStamp()}.xls`,
       columns: PAYMENT_LOG_EXPORT_COLUMNS,
     },
     {
@@ -3152,7 +3189,7 @@ function ReportExportTab({ adminToken, adminUser }) {
       title: 'Delivery Messages',
       description: 'Log pengiriman link gallery via WhatsApp/email.',
       endpoint: '/api/admin/messages',
-      filename: `urbanmenphoto_messages_${reportDateStamp()}.csv`,
+      filename: `urbanmenphoto_messages_${reportDateStamp()}.xls`,
       columns: MESSAGE_EXPORT_COLUMNS,
     },
     {
@@ -3160,7 +3197,7 @@ function ReportExportTab({ adminToken, adminUser }) {
       title: 'Audit Activity',
       description: 'Jejak aksi admin, customer session, dan webhook backend.',
       endpoint: '/api/admin/audit-logs',
-      filename: `urbanmenphoto_audit_logs_${reportDateStamp()}.csv`,
+      filename: `urbanmenphoto_audit_logs_${reportDateStamp()}.xls`,
       columns: AUDIT_EXPORT_COLUMNS,
       ownerOnly: true,
     },
@@ -3176,7 +3213,7 @@ function ReportExportTab({ adminToken, adminUser }) {
         setMessage(`${report.title}: tidak ada data untuk diekspor.`);
         return;
       }
-      downloadCSV(report.filename, rows, report.columns);
+      downloadSpreadsheet(report.filename, rows, report.columns);
       setMessage(`${report.title}: ${rows.length} data berhasil diekspor.`);
     } catch (err) {
       setError(`${report.title}: ${err.message || 'Export gagal.'}`);
@@ -3193,9 +3230,9 @@ function ReportExportTab({ adminToken, adminUser }) {
       const sessionRows = await fetchAllAdminRows('/api/admin/sessions', adminToken);
       const transactionRows = await fetchAllAdminRows('/api/admin/transactions', adminToken);
       const paymentLogRows = await fetchAllAdminRows('/api/admin/payment-logs', adminToken);
-      downloadCSV(`urbanmenphoto_sessions_${reportDateStamp()}.csv`, sessionRows, SESSION_EXPORT_COLUMNS);
-      downloadCSV(`urbanmenphoto_transactions_${reportDateStamp()}.csv`, transactionRows, TRANSACTION_EXPORT_COLUMNS);
-      downloadCSV(`urbanmenphoto_payment_logs_${reportDateStamp()}.csv`, paymentLogRows, PAYMENT_LOG_EXPORT_COLUMNS);
+      downloadSpreadsheet(`urbanmenphoto_sessions_${reportDateStamp()}.xls`, sessionRows, SESSION_EXPORT_COLUMNS);
+      downloadSpreadsheet(`urbanmenphoto_transactions_${reportDateStamp()}.xls`, transactionRows, TRANSACTION_EXPORT_COLUMNS);
+      downloadSpreadsheet(`urbanmenphoto_payment_logs_${reportDateStamp()}.xls`, paymentLogRows, PAYMENT_LOG_EXPORT_COLUMNS);
       setMessage(`Bundle rekap event berhasil diekspor: ${sessionRows.length} sessions, ${transactionRows.length} transactions, ${paymentLogRows.length} payment logs.`);
     } catch (err) {
       setError(err.message || 'Export bundle gagal.');
@@ -3210,7 +3247,7 @@ function ReportExportTab({ adminToken, adminUser }) {
         <div style={{ display: 'flex', justifyContent: 'space-between', gap: '1rem', alignItems: 'flex-start', marginBottom: '1.5rem', flexWrap: 'wrap' }}>
           <div>
             <h2 style={{ margin: 0, color: '#111' }}>Export Report</h2>
-            <p style={{ margin: '0.25rem 0 0', color: '#6c757d', fontSize: '0.9rem' }}>Download CSV untuk rekap event, transaksi, gallery, dan audit.</p>
+            <p style={{ margin: '0.25rem 0 0', color: '#6c757d', fontSize: '0.9rem' }}>Download XLS untuk rekap event, transaksi, gallery, dan audit.</p>
           </div>
           <button
             type="button"
@@ -3238,7 +3275,7 @@ function ReportExportTab({ adminToken, adminUser }) {
                 disabled={Boolean(exportingKey)}
                 style={{ width: '100%', marginTop: '1rem', padding: '0.75rem 1rem', borderRadius: '8px', border: 'none', background: '#f97316', color: 'white', cursor: exportingKey ? 'wait' : 'pointer', fontWeight: 900 }}
               >
-                {exportingKey === report.key ? 'Exporting...' : 'Download CSV'}
+                {exportingKey === report.key ? 'Exporting...' : 'Download XLS'}
               </button>
             </div>
           ))}
@@ -3465,7 +3502,7 @@ function AuditActivityTab({ adminToken }) {
         setError('Tidak ada audit log untuk diekspor.');
         return;
       }
-      downloadCSV(`urbanmenphoto_audit_filtered_${reportDateStamp()}.csv`, filteredLogs, [
+      downloadSpreadsheet(`urbanmenphoto_audit_filtered_${reportDateStamp()}.xls`, filteredLogs, [
         ...AUDIT_EXPORT_COLUMNS,
         { key: 'actorEmail', label: 'Actor Email', value: row => actorMap[row.actorId]?.email || (row.actorId ? row.actorId : 'system/customer') },
         { key: 'actorRole', label: 'Actor Role', value: row => actorMap[row.actorId]?.role || (row.actorId ? '-' : 'system/customer') },
@@ -3504,7 +3541,7 @@ function AuditActivityTab({ adminToken }) {
               {loading ? 'Loading...' : 'Refresh'}
             </button>
             <button onClick={exportFiltered} disabled={exporting || loading} style={{ padding: '0.65rem 1rem', background: '#111827', color: 'white', border: 'none', borderRadius: '8px', cursor: exporting ? 'wait' : 'pointer', fontWeight: 'bold' }}>
-              {exporting ? 'Exporting...' : 'Export Filtered CSV'}
+              {exporting ? 'Exporting...' : 'Export Filtered XLS'}
             </button>
           </div>
         </div>
@@ -3709,7 +3746,7 @@ function BackendListTab({ title, description, endpoint, adminToken, columns }) {
         },
       }));
       const name = title.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '');
-      downloadCSV(`urbanmenphoto_${name || 'report'}_${reportDateStamp()}.csv`, exportRows, exportColumns);
+      downloadSpreadsheet(`urbanmenphoto_${name || 'report'}_${reportDateStamp()}.xls`, exportRows, exportColumns);
     } catch (err) {
       setError(err.message || 'Export gagal.');
     } finally {
@@ -3746,7 +3783,7 @@ function BackendListTab({ title, description, endpoint, adminToken, columns }) {
             Refresh
           </button>
           <button onClick={exportCurrentList} disabled={exporting} style={{ padding: '0.6rem 1rem', background: '#111827', color: 'white', border: 'none', borderRadius: '6px', cursor: exporting ? 'wait' : 'pointer', fontWeight: 'bold' }}>
-            {exporting ? 'Exporting...' : 'Export CSV'}
+            {exporting ? 'Exporting...' : 'Export XLS'}
           </button>
         </div>
       </div>
@@ -4896,7 +4933,7 @@ export default function AdminDashboard() {
             alert('Belum ada session/gallery untuk diekspor.');
             return;
           }
-          downloadCSV(`urbanmenphoto_gallery_sessions_${reportDateStamp()}.csv`, sessions, SESSION_EXPORT_COLUMNS);
+          downloadSpreadsheet(`urbanmenphoto_gallery_sessions_${reportDateStamp()}.xls`, sessions, SESSION_EXPORT_COLUMNS);
         };
         return (
           <div style={{ background: 'white', padding: '2rem', borderRadius: '12px', border: '1px solid #e9ecef', boxShadow: '0 2px 8px rgba(0,0,0,0.02)' }}>
@@ -4907,7 +4944,7 @@ export default function AdminDashboard() {
               </div>
               <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
                 <button onClick={() => fetchSessions()} style={{ padding: '0.5rem 1rem', background: '#f8f9fa', border: '1px solid #e9ecef', borderRadius: '6px', cursor: 'pointer', fontWeight: 'bold' }}>Refresh</button>
-                <button onClick={exportGallerySessions} style={{ padding: '0.5rem 1rem', background: '#111827', color: 'white', border: 'none', borderRadius: '6px', cursor: 'pointer', fontWeight: 'bold' }}>Export CSV</button>
+                <button onClick={exportGallerySessions} style={{ padding: '0.5rem 1rem', background: '#111827', color: 'white', border: 'none', borderRadius: '6px', cursor: 'pointer', fontWeight: 'bold' }}>Export XLS</button>
               </div>
             </div>
             

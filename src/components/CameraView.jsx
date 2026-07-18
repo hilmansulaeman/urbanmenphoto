@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { captureVideoFrame, getCameraStreamForProfile, stopStream } from '../utils/camera.js';
 import { getCameraProfiles, getKioskSettings, saveKioskSettings } from '../utils/kioskConfig.js';
+import { captureDslrPhoto, listDslrCameras } from '../utils/dslr.js';
 
 const RetakeIcon = () => (
   <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#6b7280" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ width: 18, height: 18 }}>
@@ -61,6 +62,7 @@ export default function CameraView({ filter, poseLimit = 5, onFinishSession }) {
   const [cameraPreviewReady, setCameraPreviewReady] = useState({});
   const [cameraPreviewErrors, setCameraPreviewErrors] = useState({});
   const activeCamera = cameraProfiles.find(profile => profile.id === activeCameraId) || cameraProfiles[0];
+  const isDslr = activeCamera?.captureMode === 'dslr';
 
   useEffect(() => {
     let cancelled = false;
@@ -74,6 +76,16 @@ export default function CameraView({ filter, poseLimit = 5, onFinishSession }) {
       if (isCameraPickerOpen) return;
 
       try {
+        if (activeCamera?.captureMode === 'dslr') {
+          if (!activeCamera.tetherPort) throw new Error('Port DSLR belum dipilih oleh admin.');
+          const cameras = await listDslrCameras();
+          if (cancelled) return;
+          if (!cameras.some(camera => camera.port === activeCamera.tetherPort)) {
+            throw new Error('DSLR tidak terdeteksi. Pastikan kamera menyala dan kabel USB data terpasang.');
+          }
+          setIsReady(true);
+          return;
+        }
         const resolved = await getCameraStreamForProfile(activeCamera, cameraSettings.defaultCamera || 'user');
         const { stream } = resolved;
         if (cancelled) {
@@ -107,7 +119,7 @@ export default function CameraView({ filter, poseLimit = 5, onFinishSession }) {
       cancelled = true;
       stopStream(streamRef.current);
     };
-  }, [activeCamera?.deviceId, activeCamera?.facingMode, activeCamera?.id, cameraSettings.defaultCamera, isCameraPickerOpen, cameraAttempt]);
+  }, [activeCamera?.captureMode, activeCamera?.deviceId, activeCamera?.facingMode, activeCamera?.id, activeCamera?.tetherPort, cameraSettings.defaultCamera, isCameraPickerOpen, cameraAttempt]);
 
   useEffect(() => {
     if (!isCameraPickerOpen) return undefined;
@@ -119,6 +131,13 @@ export default function CameraView({ filter, poseLimit = 5, onFinishSession }) {
     const startPreviews = async () => {
       for (const profile of cameraProfiles) {
         try {
+          if (profile.captureMode === 'dslr') {
+            if (!profile.tetherPort) throw new Error('Port DSLR belum dipilih oleh admin.');
+            const cameras = await listDslrCameras();
+            if (!cameras.some(camera => camera.port === profile.tetherPort)) throw new Error('DSLR tidak terdeteksi.');
+            if (!cancelled) setCameraPreviewReady(previous => ({ ...previous, [profile.id]: true }));
+            continue;
+          }
           const resolved = await getCameraStreamForProfile(profile, cameraSettings.defaultCamera || 'user');
           if (cancelled) {
             stopStream(resolved.stream);
@@ -159,18 +178,45 @@ export default function CameraView({ filter, poseLimit = 5, onFinishSession }) {
   }, [cameraProfiles, cameraSettings.defaultCamera, isCameraPickerOpen]);
 
   const handleCaptureClick = () => {
-    if (!videoRef.current || !isReady || isRecordingBurst || countdown !== null) return;
+    if ((!isDslr && !videoRef.current) || !isReady || isRecordingBurst || countdown !== null) return;
     if (capturedPhotos.length >= poseLimit) return;
     setIsAutoCapturing(true);
   };
 
-  const capturePhoto = useCallback(() => {
-    if (!videoRef.current || !isReady || isRecordingBurst) return;
+  const capturePhoto = useCallback(async () => {
+    if (!isReady || isRecordingBurst) return;
     if (capturedPhotos.length >= poseLimit) return;
 
     setIsRecordingBurst(true);
     setFlash(true);
     setTimeout(() => setFlash(false), 150);
+
+    if (isDslr) {
+      try {
+        const result = await captureDslrPhoto(activeCamera?.tetherPort);
+        setCapturedPhotos(prev => {
+          const newPhotos = [...prev, {
+            src: result.url,
+            frames: [result.url],
+            cameraId: activeCamera?.id || 'camera-1',
+            cameraName: activeCamera?.name || 'Posisi Kamera 1',
+          }];
+          if (newPhotos.length < poseLimit) setIsCameraPickerOpen(true);
+          return newPhotos;
+        });
+      } catch (captureError) {
+        setError(captureError.message || 'DSLR gagal mengambil foto.');
+      } finally {
+        setIsRecordingBurst(false);
+        setIsAutoCapturing(false);
+      }
+      return;
+    }
+
+    if (!videoRef.current) {
+      setIsRecordingBurst(false);
+      return;
+    }
 
     const burstFrames = [];
     let count = 0;
@@ -202,7 +248,7 @@ export default function CameraView({ filter, poseLimit = 5, onFinishSession }) {
         setIsAutoCapturing(false);
       }
     }, 150);
-  }, [isReady, activeCamera?.id, activeCamera?.name, activeCamera?.mirror, cameraSettings.mirrorCamera, poseLimit, capturedPhotos.length, isRecordingBurst]);
+  }, [isReady, isDslr, activeCamera?.id, activeCamera?.name, activeCamera?.tetherPort, activeCamera?.mirror, cameraSettings.mirrorCamera, poseLimit, capturedPhotos.length, isRecordingBurst]);
 
   useEffect(() => {
     if (!isAutoCapturing) return;
@@ -270,18 +316,21 @@ export default function CameraView({ filter, poseLimit = 5, onFinishSession }) {
 
       {/* Big Camera Feed */}
       <div style={{ position: 'relative', background: 'black', borderRadius: '16px', overflow: 'hidden', aspectRatio: '16/11', maxHeight: 'calc(100svh - 120px)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-        <video
-          ref={videoRef}
-          className={(activeCamera?.mirror ?? cameraSettings.mirrorCamera) ? 'is-mirrored' : ''}
-          playsInline
-          muted
-          style={{
-            filter: filter?.css || 'none',
-            width: '100%',
-            height: '100%',
-            objectFit: 'cover'
-          }}
-        />
+        {isDslr ? (
+          <div style={{ color: 'white', textAlign: 'center', padding: '2rem' }}>
+            <CameraIcon />
+            <p style={{ margin: '1rem 0 .35rem', fontWeight: 800 }}>DSLR Tethering siap</p>
+            <p style={{ margin: 0, color: '#d1d5db', fontSize: '.9rem' }}>Tekan tombol kamera untuk mengambil foto.</p>
+          </div>
+        ) : (
+          <video
+            ref={videoRef}
+            className={(activeCamera?.mirror ?? cameraSettings.mirrorCamera) ? 'is-mirrored' : ''}
+            playsInline
+            muted
+            style={{ filter: filter?.css || 'none', width: '100%', height: '100%', objectFit: 'cover' }}
+          />
+        )}
 
         {flash && (
           <div style={{
@@ -501,14 +550,11 @@ export default function CameraView({ filter, poseLimit = 5, onFinishSession }) {
                   aria-label={`Pilih ${profile.name}`}
                   style={{ position: 'relative', minHeight: 'min(58vh, 720px)', padding: 0, overflow: 'hidden', borderRadius: '20px', border: `2px solid ${profile.id === activeCameraId ? '#ff7414' : '#111'}`, background: '#000', color: 'white', cursor: 'pointer', boxShadow: profile.id === activeCameraId ? '0 0 0 4px rgba(255,116,20,.12)' : 'none' }}
                 >
-                  <video
-                    ref={(element) => { pickerVideoRefs.current[profile.id] = element; }}
-                    className={profile.mirror ? 'is-mirrored' : ''}
-                    autoPlay
-                    muted
-                    playsInline
-                    style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover' }}
-                  />
+                  {profile.captureMode === 'dslr' ? (
+                    <span style={{ position: 'absolute', inset: 0, display: 'grid', placeItems: 'center', color: 'white' }}><span><CameraIcon /><br />DSLR Tethering</span></span>
+                  ) : (
+                    <video ref={(element) => { pickerVideoRefs.current[profile.id] = element; }} className={profile.mirror ? 'is-mirrored' : ''} autoPlay muted playsInline style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover' }} />
+                  )}
                   <span style={{ position: 'absolute', top: '1.1rem', left: '1.1rem', zIndex: 1, minWidth: '240px', padding: '0.5rem 1rem', borderRadius: '999px', background: '#ff7414', color: 'white', fontSize: '0.9rem', fontWeight: 900, letterSpacing: '.08em', textTransform: 'uppercase' }}>{profile.name}</span>
                   <span style={{ position: 'absolute', inset: 0, display: 'grid', placeItems: 'center', opacity: cameraPreviewReady[profile.id] ? 0 : 1, transition: 'opacity .2s' }}>
                     <span style={{ display: 'grid', justifyItems: 'center', gap: '0.8rem', maxWidth: '78%', textAlign: 'center' }}>

@@ -2,6 +2,10 @@
 
 Potobox adalah web photobooth frontend berbasis React + Vite. Aplikasi berjalan sepenuhnya di browser untuk mengambil foto dari kamera, memilih filter, memilih frame, membuat card 1/4/6 foto, dan mengunduh hasil sebagai PNG.
 
+## DSLR tethering (Canon USB)
+
+Untuk memakai Canon EOS lewat kabel USB, instal `gphoto2` pada komputer yang menjalankan backend (`brew install gphoto2` di macOS atau `sudo apt install gphoto2` di Debian/Ubuntu). Nyalakan kamera, hubungkan dengan kabel USB data, kemudian di Admin → Camera Device Booth klik **Refresh Kamera**, pilih **DSLR Tethering (USB)** dan pilih port Canon yang muncul. DSLR mengambil foto asli saat shutter booth ditekan; live preview browser tidak tersedia melalui tethering USB.
+
 ## Fitur
 
 - Capture foto dari kamera browser.

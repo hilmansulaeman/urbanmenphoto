@@ -83,6 +83,8 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("/api/payments/", s.handlePaymentByID)
 	mux.HandleFunc("/api/events/errors", s.handleErrorEvents)
 	mux.HandleFunc("/api/frames", s.handleFrames)
+	mux.HandleFunc("/api/dslr/cameras", s.handleDSLRCameras)
+	mux.HandleFunc("/api/dslr/capture", s.handleDSLRCapture)
 	mux.HandleFunc("/api/admin/auth/login", s.handleAdminLogin)
 	mux.HandleFunc("/api/admin/auth/logout", s.handleAdminLogout)
 	mux.HandleFunc("/api/admin/auth/me", s.handleAdminMe)
