@@ -9,7 +9,7 @@ Repository ini memakai GitHub Actions untuk validasi dan deploy ke Vercel.
 
 ## Branch Mapping
 
-- `dev`: deploy frontend ke Cloudflare Workers project `photo-box-dev` melalui integrasi Git Cloudflare.
+- `dev`: deploy frontend ke Cloudflare Workers project `urbanmenphoto` melalui integrasi Git Cloudflare.
 - `staging` atau `main`: deploy backend ke `urbanmenphoto-backend-staging`, lalu deploy frontend ke `photo-box-staging`.
 
 ## GitHub Secrets
