@@ -14,6 +14,14 @@ npm run kiosk:start
 
 Perintah ini membangun frontend dan menyajikannya dari backend lokal pada origin yang sama dengan layanan tethering.
 
+Untuk test dari HP atau jaringan luar, gunakan URL HTTPS sementara dari Cloudflare Tunnel setelah kiosk hidup:
+
+```bash
+cloudflared tunnel --url http://localhost:8787
+```
+
+Buka URL `https://...trycloudflare.com` yang dicetak perintah tersebut. Tunnel hanya untuk testing: URL berubah saat proses dihentikan dan jangan gunakan untuk admin atau pembayaran produksi.
+
 ## Fitur
 
 - Capture foto dari kamera browser.

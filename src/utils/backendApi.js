@@ -1,6 +1,16 @@
 import { getConfiguredBackendApiUrl } from './kioskConfig.js';
 
-export const BACKEND_API_URL = (import.meta.env.VITE_BACKEND_API_URL || 'http://localhost:8787').replace(/\/$/, '');
+const useSameOriginBackend = import.meta.env.VITE_KIOSK_SAME_ORIGIN === 'true';
+const sameOriginBackend = typeof window !== 'undefined' ? window.location.origin : '';
+
+// The kiosk build is served by the local Go backend. Using its current origin
+// also makes a HTTPS tunnel work from phones and tablets: requests travel back
+// through the tunnel instead of incorrectly targeting that device's localhost.
+export const BACKEND_API_URL = (
+  (useSameOriginBackend && sameOriginBackend)
+  || import.meta.env.VITE_BACKEND_API_URL
+  || 'http://localhost:8787'
+).replace(/\/$/, '');
 
 export function getBackendApiUrl() {
   return getConfiguredBackendApiUrl(BACKEND_API_URL);
