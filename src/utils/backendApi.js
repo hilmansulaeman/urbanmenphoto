@@ -2,6 +2,10 @@ import { getConfiguredBackendApiUrl } from './kioskConfig.js';
 
 const useSameOriginBackend = import.meta.env.VITE_KIOSK_SAME_ORIGIN === 'true';
 const sameOriginBackend = typeof window !== 'undefined' ? window.location.origin : '';
+const isLocalHost = (url = '') => /^https?:\/\/(localhost|127\.0\.0\.1)(?::\d+)?(?:\/|$)/i.test(url);
+const isPublicHTTPSPage = typeof window !== 'undefined'
+  && window.location.protocol === 'https:'
+  && !isLocalHost(window.location.origin);
 
 // The kiosk build is served by the local Go backend. Using its current origin
 // also makes a HTTPS tunnel work from phones and tablets: requests travel back
@@ -9,11 +13,15 @@ const sameOriginBackend = typeof window !== 'undefined' ? window.location.origin
 export const BACKEND_API_URL = (
   (useSameOriginBackend && sameOriginBackend)
   || import.meta.env.VITE_BACKEND_API_URL
-  || 'http://localhost:8787'
+  || (isPublicHTTPSPage ? 'https://urbanmenphoto-backend-staging.vercel.app' : 'http://localhost:8787')
 ).replace(/\/$/, '');
 
 export function getBackendApiUrl() {
-  return getConfiguredBackendApiUrl(BACKEND_API_URL);
+  const configured = getConfiguredBackendApiUrl('');
+  // A kiosk can intentionally use localhost. A public HTTPS deployment cannot:
+  // that would point to the visitor's device and trigger mixed-content/CORS errors.
+  if (configured && !(isPublicHTTPSPage && isLocalHost(configured))) return configured;
+  return BACKEND_API_URL;
 }
 
 export async function backendRequest(path, token, options = {}) {
