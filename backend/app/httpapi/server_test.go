@@ -598,8 +598,8 @@ func TestStaffCanAccessOperationalReportsOnly(t *testing.T) {
 		req.Header.Set("authorization", "Bearer "+staffToken)
 		rec := httptest.NewRecorder()
 		handler.ServeHTTP(rec, req)
-		if rec.Code != http.StatusUnauthorized {
-			t.Fatalf("expected staff denied %s status 401, got %d: %s", path, rec.Code, rec.Body.String())
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("expected staff denied %s status 403, got %d: %s", path, rec.Code, rec.Body.String())
 		}
 	}
 }

@@ -135,7 +135,7 @@ func (s *Server) Routes() http.Handler {
 
 	mux.HandleFunc("/files/", s.handleFiles)
 
-	return s.withCORS(mux)
+	return s.withCORS(s.withAdminAuth(mux))
 }
 
 func (s *Server) withCORS(next http.Handler) http.Handler {
