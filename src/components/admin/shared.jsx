@@ -310,7 +310,7 @@ export function StatusBadge({ status, before }) {
   );
 }
 
-const getPaginationItems = (currentPage, totalPages) => {
+export const getPaginationItems = (currentPage, totalPages) => {
   const total = Math.max(1, Number(totalPages || 1));
   const current = Math.min(Math.max(1, Number(currentPage || 1)), total);
   if (total <= 5) return Array.from({ length: total }, (_, index) => index + 1);

@@ -2,12 +2,6 @@ import { useState, useEffect } from 'react';
 import { PHOTO_MODES, PAPER_SIZES, FILTER_CATEGORIES, getEditorFilterStyle, fetchCustomFilters } from '../utils/photoConfig.js';
 import { fetchCustomFrames, recordFrameUsage } from '../utils/customFrameConfig.js';
 
-const MenuIcon = () => (
-  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" style={{width: 16, height: 16}}>
-    <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 6.75h16.5M3.75 12h16.5m-16.5 5.25h16.5" />
-  </svg>
-);
-
 const defaultTransform = { x: 0, y: 0, zoom: 1, rotate: 0, flipH: false, flipV: false, filter: 'ORIGINAL' };
 const createEmptySlot = () => ({ photoIdx: null, ...defaultTransform });
 

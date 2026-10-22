@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import { useState, useEffect } from 'react';
 import { backendRequest, getBackendApiUrl } from '../utils/backendApi';
 
 export default function ProjectManager({ adminToken, onEditProject, onStartKiosk }) {

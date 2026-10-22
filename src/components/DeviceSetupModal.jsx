@@ -1,8 +1,8 @@
-import React, { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { listDslrCameras, listHardwarePrinters } from '../utils/dslr.js';
 import { getKioskSettings, saveKioskSettings, getActiveProjectId, setActiveProjectId, syncKioskSettings } from '../utils/kioskConfig.js';
 import { getBackendApiUrl } from '../utils/backendApi.js';
-import { X, Save, Lock, Camera, Printer as PrinterIcon, Download, Power, MonitorPlay, Globe, LayoutTemplate } from 'lucide-react';
+import { X, Lock, Camera, Printer as PrinterIcon, Download, Power, MonitorPlay, Globe, LayoutTemplate } from 'lucide-react';
 
 export default function DeviceSetupModal({ onClose }) {
   const [settings, setSettings] = useState(getKioskSettings());

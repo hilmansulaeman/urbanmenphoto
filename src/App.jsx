@@ -7,7 +7,6 @@ import CameraView from './components/CameraView.jsx';
 import StudioEditorView from './components/StudioEditorView.jsx';
 import LiveWallView from './components/LiveWallView.jsx';
 import ThankYouScreen from './components/ThankYouScreen.jsx';
-import FilterPanel from './components/FilterPanel.jsx';
 import { FILTERS } from './utils/photoConfig.js';
 import MobileGalleryView from './components/MobileGalleryView.jsx';
 import AdminDashboard from './components/AdminDashboard.jsx';
@@ -26,6 +25,8 @@ const STEPS = {
 };
 
 const SESSION_DURATION_MS = 5 * 60 * 1000;
+const POSE_LIMIT = 5;
+const BASIC_TIER = { id: 'basic', name: 'Basic Session', poseLimit: POSE_LIMIT, printLimit: 1, price: 35000 };
 
 function formatRemainingTime(milliseconds) {
   const totalSeconds = Math.max(0, Math.ceil(milliseconds / 1000));
@@ -71,7 +72,6 @@ export default function App() {
   });
 
   const [capturedPhotos, setCapturedPhotos] = useState([]);
-  const [selectedPhotos, setSelectedPhotos] = useState([]);
   const [sessionExpiresAt, setSessionExpiresAt] = useState(null);
   const [remainingSessionMs, setRemainingSessionMs] = useState(SESSION_DURATION_MS);
   const [backendSession, setBackendSession] = useState(null);
@@ -110,11 +110,21 @@ export default function App() {
       upsellItems: []
     });
     setCapturedPhotos([]);
-    setSelectedPhotos([]);
     setSessionExpiresAt(null);
     setRemainingSessionMs(SESSION_DURATION_MS);
     setBackendSession(null);
     setBackendPayment(null);
+  };
+
+  const startBasicOrder = () => {
+    setOrderDetails(prev => ({
+      ...prev,
+      tier: BASIC_TIER,
+      headCount: null,
+      basePrice: BASIC_TIER.price,
+      totalPrice: BASIC_TIER.price
+    }));
+    setCurrentStep(STEPS.PAYMENT_1);
   };
 
   const startTimedSession = ({ session, payment } = {}) => {
@@ -128,16 +138,7 @@ export default function App() {
   const renderStep = () => {
     switch (currentStep) {
       case STEPS.IDLE:
-        return <LandingPage onStart={() => {
-          setOrderDetails(prev => ({
-            ...prev,
-            tier: { id: 'basic', name: 'Basic Session', poseLimit: 1, printLimit: 1, price: 35000 },
-            headCount: null,
-            basePrice: 35000,
-            totalPrice: 35000
-          }));
-          setCurrentStep(STEPS.PAYMENT_1);
-        }} />;
+        return <LandingPage onStart={startBasicOrder} />;
 
       case STEPS.PACKAGE_TIER:
         return (
@@ -177,7 +178,7 @@ export default function App() {
         return (
           <CameraView
             filter={orderDetails.filter}
-            poseLimit={5}
+            poseLimit={POSE_LIMIT}
             onFinishSession={(photos) => {
               setCapturedPhotos(photos);
               setCurrentStep(STEPS.STUDIO_EDITOR);
@@ -248,16 +249,7 @@ export default function App() {
         return <ThankYouScreen onReset={resetApp} />;
 
       default:
-        return <LandingPage onStart={() => {
-          setOrderDetails(prev => ({
-            ...prev,
-            tier: { id: 'basic', name: 'Basic Session', poseLimit: 20, printLimit: 1, price: 35000 },
-            headCount: null,
-            basePrice: 35000,
-            totalPrice: 35000
-          }));
-          setCurrentStep(STEPS.PAYMENT_1);
-        }} />;
+        return <LandingPage onStart={startBasicOrder} />;
     }
   };
 

@@ -1,5 +1,5 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { getBackendApiUrl, backendRequest } from '../utils/backendApi.js';
+import { useState, useRef } from 'react';
+import { backendRequest } from '../utils/backendApi.js';
 
 export default function ProfileTab({ adminUser }) {
   const [formData, setFormData] = useState({

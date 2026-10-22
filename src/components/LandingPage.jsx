@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import { useState } from 'react';
 import DeviceSetupModal from './DeviceSetupModal.jsx';
 import { Settings } from 'lucide-react';
 

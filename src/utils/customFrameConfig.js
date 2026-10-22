@@ -5,8 +5,6 @@ export const DEFAULT_FRAME_HEIGHT = 1920;
 const DISABLED_CUSTOM_FRAMES_KEY = 'urbanmenphoto_disabled_custom_frames';
 const FRAME_USAGE_KEY = 'urbanmenphoto_frame_usage_counts';
 
-const getFrameKey = (frame = {}) => frame.id || frame.name || frame.url || frame.frameImage || '';
-
 export function getDisabledCustomFrameIds() {
   try {
     const raw = window.localStorage.getItem(DISABLED_CUSTOM_FRAMES_KEY);

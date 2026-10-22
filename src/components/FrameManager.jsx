@@ -1,9 +1,8 @@
-import React, { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { backendRequest, getBackendApiUrl } from '../utils/backendApi.js';
-import { detectTransparentHoles } from '../utils/transparencyDetector.js';
 import {
-  Search, Grid, List, ChevronDown, X, File, Plus, Wand2,
-  Trash2, Download, UploadCloud, ArrowLeft
+  Search, Grid, List, ChevronDown, X, File, Plus,
+  Trash2, Download, UploadCloud
 } from 'lucide-react';
 
 // ==============================================
