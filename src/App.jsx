@@ -228,7 +228,7 @@ export default function App() {
               if (payment) setBackendPayment(payment);
               setCurrentStep(STEPS.LIVE_WALL_SHARE);
             }}
-            onBack={() => setCurrentStep(STEPS.UPSELL)}
+            onBack={() => setCurrentStep(STEPS.STUDIO_EDITOR)}
           />
         );
 
