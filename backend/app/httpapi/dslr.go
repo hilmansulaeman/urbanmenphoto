@@ -59,15 +59,23 @@ func (s *Server) handleDSLRCapture(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) detectDSLRCameras(ctx context.Context) ([]dslrCamera, error) {
+	if s.cfg.HardwareAgentURL != "" {
+		var cameras []dslrCamera
+		if err := s.hardwareAgentRequest(ctx, http.MethodGet, "/api/cameras", nil, &cameras); err != nil {
+			return nil, err
+		}
+		return cameras, nil
+	}
 	dslrCommandMu.Lock()
 	defer dslrCommandMu.Unlock()
 	ctx, cancel := context.WithTimeout(ctx, 12*time.Second)
 	defer cancel()
+	exec.CommandContext(ctx, "killall", "PTPCamera").Run()
 	output, err := exec.CommandContext(ctx, "gphoto2", "--auto-detect").CombinedOutput()
 	if err != nil {
 		return nil, dslrCommandError(err, output)
 	}
-	var cameras []dslrCamera
+	cameras := []dslrCamera{}
 	for _, line := range strings.Split(string(output), "\n") {
 		line = strings.TrimSpace(line)
 		fields := strings.Fields(line)
@@ -84,6 +92,47 @@ func (s *Server) detectDSLRCameras(ctx context.Context) ([]dslrCamera, error) {
 }
 
 func (s *Server) captureDSLR(ctx context.Context, port string) (string, error) {
+	if s.cfg.HardwareAgentURL != "" {
+		if strings.TrimSpace(port) == "" || strings.ContainsAny(port, "\r\n") {
+			return "", errors.New("DSLR camera ID is invalid")
+		}
+		var captured struct {
+			FileName string `json:"fileName"`
+		}
+		if err := s.hardwareAgentRequest(ctx, http.MethodPost, "/api/cameras/"+hardwareAgentPathSegment(port)+"/capture", nil, &captured); err != nil {
+			return "", err
+		}
+		if captured.FileName == "" {
+			return "", errors.New("Hardware Agent did not return a capture file")
+		}
+		content, err := s.hardwareAgentDownload(ctx, "/api/captures/"+hardwareAgentPathSegment(captured.FileName))
+		if err != nil || len(content) == 0 {
+			if err != nil {
+				return "", err
+			}
+			return "", errors.New("Hardware Agent returned an empty image")
+		}
+		dir := filepath.Join(s.cfg.StorageDir, "tether")
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			return "", fmt.Errorf("prepare tether storage: %w", err)
+		}
+		cleanupTetherFiles(dir, time.Now().Add(-24*time.Hour))
+		name := fmt.Sprintf("dslr-%d.jpg", time.Now().UnixNano())
+		filePath := filepath.Join(dir, name)
+		if err := os.WriteFile(filePath, content, 0644); err != nil {
+			return "", fmt.Errorf("save Hardware Agent capture: %w", err)
+		}
+		if s.hasSupabaseStorage() {
+			key := filepath.ToSlash(filepath.Join("tether", name))
+			publicURL, err := s.uploadSupabaseObject(key, "image/jpeg", content)
+			if err != nil {
+				return "", err
+			}
+			_ = os.Remove(filePath)
+			return publicURL, nil
+		}
+		return strings.TrimRight(s.cfg.PublicBaseURL, "/") + "/files/tether/" + name, nil
+	}
 	dslrCommandMu.Lock()
 	defer dslrCommandMu.Unlock()
 	if strings.ContainsAny(port, "\r\n") || !strings.HasPrefix(port, "usb:") {
@@ -98,6 +147,7 @@ func (s *Server) captureDSLR(ctx context.Context, port string) (string, error) {
 	filePath := filepath.Join(dir, name)
 	ctx, cancel := context.WithTimeout(ctx, 45*time.Second)
 	defer cancel()
+	exec.CommandContext(ctx, "killall", "PTPCamera").Run()
 	output, err := exec.CommandContext(ctx, "gphoto2", "--port", port, "--capture-image-and-download", "--force-overwrite", "--filename", filePath).CombinedOutput()
 	if err != nil {
 		_ = os.Remove(filePath)
@@ -105,6 +155,19 @@ func (s *Server) captureDSLR(ctx context.Context, port string) (string, error) {
 	}
 	if info, err := os.Stat(filePath); err != nil || info.Size() == 0 {
 		return "", errors.New("DSLR did not return an image")
+	}
+	if s.hasSupabaseStorage() {
+		content, err := os.ReadFile(filePath)
+		if err != nil {
+			return "", fmt.Errorf("read DSLR image: %w", err)
+		}
+		key := filepath.ToSlash(filepath.Join("tether", name))
+		publicURL, err := s.uploadSupabaseObject(key, "image/jpeg", content)
+		if err != nil {
+			return "", err
+		}
+		_ = os.Remove(filePath)
+		return publicURL, nil
 	}
 	return strings.TrimRight(s.cfg.PublicBaseURL, "/") + "/files/tether/" + name, nil
 }

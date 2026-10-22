@@ -1,4 +1,5 @@
 import { supabase } from './supabaseClient';
+import { backendRequest } from './backendApi.js';
 
 export const DEFAULT_FRAME_WIDTH = 1080;
 export const DEFAULT_FRAME_HEIGHT = 1920;
@@ -165,52 +166,39 @@ export async function fetchCustomFrames(options = {}) {
     includeInvalid = false,
     includeDisabled = false,
   } = options;
-  if (!supabase) return [];
   
   try {
-    const { data: files, error } = await supabase.storage
-      .from('potobox-galleries')
-      .list('frames');
-      
-    if (error) throw error;
-    if (!files) return [];
+    const rawData = await backendRequest('/api/frames');
+    const framesData = Array.isArray(rawData) ? rawData : rawData?.data || [];
+    
+    const usageCounts = getFrameUsageCounts();
 
-    // Separate PNGs and JSONs
-    const pngFiles = files.filter(f => f.name.endsWith('.png'));
-    const jsonFiles = files.filter(f => f.name.endsWith('.json'));
-
-    const frames = await Promise.all(pngFiles.map(async file => {
-      const baseName = file.name.split('.')[0];
-      const { data: { publicUrl } } = supabase.storage
-        .from('potobox-galleries')
-        .getPublicUrl(`frames/${file.name}`);
-        
+    const frames = framesData.map(f => {
       let slots = null;
-      // Check if corresponding JSON exists
-      const hasJson = jsonFiles.find(f => f.name === `${baseName}.json`);
-      if (hasJson) {
-        try {
-          const { data: { publicUrl: jsonUrl } } = supabase.storage
-            .from('potobox-galleries')
-            .getPublicUrl(`frames/${baseName}.json`);
-          const res = await fetch(jsonUrl);
-          if (res.ok) {
-            slots = await res.json();
-          }
-        } catch (e) {
-          console.error(`Failed to load JSON metadata for ${baseName}`, e);
-        }
+      try {
+        if (f.slotJson) slots = JSON.parse(f.slotJson);
+      } catch (e) {
+        console.error('Failed to parse slots for frame:', f.name);
       }
 
       const normalized = normalizeFrameConfig({
         ...(Array.isArray(slots) ? { slots } : slots || {}),
-        url: publicUrl,
+        url: f.imageUrl,
+        name: f.name,
+        templateType: f.templateType,
+        paperSize: f.paperSize,
+        orientation: f.orientation,
+        photoCount: f.layoutCount,
+        layoutCount: f.layoutCount,
+        printCopies: f.printCopies,
+        active: f.active,
       });
         
       const frameData = {
-        id: `custom_${file.name}`,
-        name: baseName,
-        url: publicUrl,
+        id: 'custom_' + f.id.toString(),
+        name: f.name,
+        url: f.imageUrl,
+        category: f.category || 'Baru',
         frameImage: normalized.frameImage,
         width: normalized.width,
         height: normalized.height,
@@ -225,18 +213,16 @@ export async function fetchCustomFrames(options = {}) {
         active: normalized.active,
         slots: normalized.slots,
       };
+      
       const validation = validateFrameConfig(frameData);
-      const disabledIds = getDisabledCustomFrameIds();
-      const disabled = disabledIds.includes(getFrameKey(frameData));
-
-      const usageCounts = getFrameUsageCounts();
+      
       return {
         ...frameData,
-        disabled,
-        usageCount: Number(usageCounts[frameData.id] || 0),
+        disabled: !f.active,
+        usageCount: usageCounts[frameData.id] || 0,
         validation,
       };
-    }));
+    });
     
     return frames
       .filter((frame) => {
@@ -252,7 +238,7 @@ export async function fetchCustomFrames(options = {}) {
         return Number(b.usageCount || 0) - Number(a.usageCount || 0);
       });
   } catch (err) {
-    console.error('Failed to fetch custom frames from Supabase', err);
+    console.error('Failed to fetch custom frames from Backend API', err);
     return [];
   }
 }

@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	mathrand "math/rand"
 	"net/http"
 	"net/mail"
 	"net/smtp"
@@ -83,11 +84,18 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("/api/payments/", s.handlePaymentByID)
 	mux.HandleFunc("/api/events/errors", s.handleErrorEvents)
 	mux.HandleFunc("/api/frames", s.handleFrames)
+	mux.HandleFunc("/api/settings", s.handleSettings)
+	mux.HandleFunc("/api/projects", s.handlePublicProjects)
 	mux.HandleFunc("/api/dslr/cameras", s.handleDSLRCameras)
 	mux.HandleFunc("/api/dslr/capture", s.handleDSLRCapture)
 	mux.HandleFunc("/api/admin/auth/login", s.handleAdminLogin)
+	mux.HandleFunc("/api/admin/auth/login/verify-otp", s.handleAdminVerifyOTP)
+	mux.HandleFunc("/api/admin/auth/2fa/toggle", s.handleAdminToggle2FA)
 	mux.HandleFunc("/api/admin/auth/logout", s.handleAdminLogout)
 	mux.HandleFunc("/api/admin/auth/me", s.handleAdminMe)
+	mux.HandleFunc("/api/auth/google/login", s.handleGoogleLogin)
+	mux.HandleFunc("/api/auth/google/callback", s.handleGoogleCallback)
+	mux.HandleFunc("/api/auth/google/verify", s.handleGoogleVerify)
 	mux.HandleFunc("/api/admin/users", s.handleAdminUsers)
 	mux.HandleFunc("/api/admin/users/", s.handleAdminUserByID)
 	mux.HandleFunc("/api/admin/sessions", s.handleAdminSessions)
@@ -101,9 +109,30 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("/api/admin/storage", s.handleAdminStorage)
 	mux.HandleFunc("/api/admin/cleanup", s.handleAdminCleanup)
 	mux.HandleFunc("/api/admin/frames", s.handleAdminFrames)
+	mux.HandleFunc("/api/admin/frames/upload", s.handleAdminFrameUpload)
 	mux.HandleFunc("/api/admin/frames/", s.handleAdminFrameByID)
+	mux.HandleFunc("/api/admin/filters", s.handleAdminFilters)
+	mux.HandleFunc("/api/admin/filters/", s.handleAdminFilterByID)
 	mux.HandleFunc("/api/admin/vouchers", s.handleAdminVouchers)
+	mux.HandleFunc("/api/admin/vouchers/bulk-delete", s.handleAdminBulkDeleteVouchers)
 	mux.HandleFunc("/api/admin/vouchers/", s.handleAdminVoucherByID)
+
+	mux.HandleFunc("/api/admin/projects", s.handleAdminProjects)
+	mux.HandleFunc("/api/admin/projects/", s.handleAdminProjectByID)
+
+	mux.HandleFunc("/api/admin/wallet", s.handleAdminWallet)
+	mux.HandleFunc("/api/admin/wallet/settings", s.handleAdminWalletSettings)
+	mux.HandleFunc("/api/admin/wallet/withdraw", s.handleAdminWalletWithdraw)
+
+	mux.HandleFunc("/api/admin/subscriptions", s.handleAdminSubscriptions)
+	mux.HandleFunc("/api/admin/subscriptions/", s.handleAdminSubscriptionByID)
+
+	mux.HandleFunc("/api/admin/payment_keys", s.handleAdminPaymentKeys)
+
+	mux.HandleFunc("/api/admin/frames_gif", s.handleAdminFramesGif)
+	mux.HandleFunc("/api/admin/frames_gif/upload", s.handleAdminFrameGifUpload)
+	mux.HandleFunc("/api/admin/frames_gif/", s.handleAdminFrameGifByID)
+
 	mux.HandleFunc("/files/", s.handleFiles)
 
 	return s.withCORS(mux)
@@ -514,6 +543,35 @@ func (s *Server) handleAdminLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	s.clearLoginAttempt(email)
 
+	if user.TwoFactorEnabled {
+		otp := fmt.Sprintf("%06d", mathrand.Intn(1000000))
+		if err := s.store.UpsertLoginOTP(models.LoginOTP{
+			Email:     user.Email,
+			OTP:       otp,
+			ExpiresAt: time.Now().Add(5 * time.Minute),
+			CreatedAt: time.Now(),
+		}); err != nil {
+			writeError(w, http.StatusInternalServerError, "Failed to generate OTP.")
+			return
+		}
+
+		if s.isSMTPConfigured() {
+			subject := "Kode Verifikasi Login Admin"
+			message := fmt.Sprintf("Kode OTP Anda adalah: %s\nBerlaku selama 5 menit.", otp)
+			go s.sendEmail(user.Email, subject, message)
+		} else {
+			// Fallback: If no SMTP, just log it to stdout for debugging (or they would be locked out)
+			fmt.Printf("[2FA OTP] Email: %s, OTP: %s\n", user.Email, otp)
+		}
+
+		s.audit(r, &user.ID, "admin.login.2fa_sent", "admin", true)
+		writeJSON(w, http.StatusOK, response{Data: models.AdminLoginResponse{
+			Authenticated: false,
+			Requires2FA:   true,
+		}})
+		return
+	}
+
 	token := newID() + "." + shortCode()
 	now := time.Now()
 	expiresAt := now.Add(time.Duration(s.cfg.AdminTokenTTLHrs) * time.Hour)
@@ -534,6 +592,94 @@ func (s *Server) handleAdminLogin(w http.ResponseWriter, r *http.Request) {
 		ExpiresAt:     expiresAt.Format(time.RFC3339),
 		Role:          user.Role,
 	}})
+}
+
+func (s *Server) handleAdminVerifyOTP(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "Method not allowed.")
+		return
+	}
+	if !s.allowRequest(r, "admin-login-otp", 5) {
+		writeError(w, http.StatusTooManyRequests, "Too many verification attempts.")
+		return
+	}
+
+	var body models.AdminVerifyOTPRequest
+	if err := readJSON(r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	email := strings.ToLower(strings.TrimSpace(body.Email))
+	
+	if !s.store.VerifyLoginOTP(email, body.OTP) {
+		s.recordFailedLogin(email)
+		s.audit(r, nil, "admin.login.2fa_failed", "admin", false)
+		writeError(w, http.StatusUnauthorized, "Kode OTP salah atau sudah kadaluarsa.")
+		return
+	}
+	
+	s.store.DeleteLoginOTP(email)
+	s.clearLoginAttempt(email)
+
+	user, ok := s.store.FindAdminUserByEmail(email)
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "User not found.")
+		return
+	}
+
+	token := newID() + "." + shortCode()
+	now := time.Now()
+	expiresAt := now.Add(time.Duration(s.cfg.AdminTokenTTLHrs) * time.Hour)
+	if err := s.store.InsertAdminToken(models.AdminToken{
+		TokenHash: auth.HashToken(token),
+		UserID:    user.ID,
+		ExpiresAt: expiresAt,
+		CreatedAt: now,
+	}); err != nil {
+		writeError(w, http.StatusInternalServerError, "Failed to create admin token.")
+		return
+	}
+	s.audit(r, &user.ID, "admin.login.success", "admin", true)
+
+	writeJSON(w, http.StatusOK, response{Data: models.AdminLoginResponse{
+		Authenticated: true,
+		Token:         token,
+		ExpiresAt:     expiresAt.Format(time.RFC3339),
+		Role:          user.Role,
+	}})
+}
+
+func (s *Server) handleAdminToggle2FA(w http.ResponseWriter, r *http.Request) {
+	adminUser, err := s.requireAdmin(r)
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, err.Error())
+		return
+	}
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "Method not allowed.")
+		return
+	}
+
+	var body struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := readJSON(r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	if err := s.store.ToggleTwoFactor(adminUser.ID, body.Enabled); err != nil {
+		writeError(w, http.StatusInternalServerError, "Gagal mengubah status 2FA.")
+		return
+	}
+	
+	action := "admin.2fa.disabled"
+	if body.Enabled {
+		action = "admin.2fa.enabled"
+	}
+	s.audit(r, &adminUser.ID, action, "admin_users:"+adminUser.ID, true)
+
+	writeJSON(w, http.StatusOK, response{Data: map[string]any{"success": true}})
 }
 
 func (s *Server) handleAdminMe(w http.ResponseWriter, r *http.Request) {
@@ -865,6 +1011,61 @@ func (s *Server) handlePayments(w http.ResponseWriter, r *http.Request) {
 	}
 
 	now := time.Now()
+	
+	// Process Voucher if provided
+	var voucherID *string
+	var appliedVoucher *models.Voucher
+	var discountAmount int64 = 0
+	originalAmount := body.Amount
+	finalAmount := originalAmount
+
+	if body.VoucherCode != "" {
+		code := normalizeVoucherCode(body.VoucherCode)
+		for _, v := range s.store.ListVouchers() {
+			if strings.EqualFold(v.Code, code) {
+				appliedVoucher = &v
+				break
+			}
+		}
+
+		if appliedVoucher == nil || !appliedVoucher.Active {
+			writeError(w, http.StatusBadRequest, "Invalid or inactive voucher code.")
+			return
+		}
+		if appliedVoucher.StartsAt != nil && now.Before(*appliedVoucher.StartsAt) {
+			writeError(w, http.StatusBadRequest, "Voucher is not yet active.")
+			return
+		}
+		if appliedVoucher.EndsAt != nil && now.After(*appliedVoucher.EndsAt) {
+			writeError(w, http.StatusBadRequest, "Voucher has expired.")
+			return
+		}
+		if appliedVoucher.UsageLimit > 0 && appliedVoucher.UsedCount >= appliedVoucher.UsageLimit {
+			writeError(w, http.StatusBadRequest, "Voucher usage limit reached.")
+			return
+		}
+		if appliedVoucher.MinAmount > 0 && originalAmount < appliedVoucher.MinAmount {
+			writeError(w, http.StatusBadRequest, "Minimum amount for this voucher not met.")
+			return
+		}
+
+		if appliedVoucher.Type == "fixed" {
+			discountAmount = appliedVoucher.Value
+		} else if appliedVoucher.Type == "percent" {
+			discountAmount = (originalAmount * appliedVoucher.Value) / 100
+		}
+
+		if appliedVoucher.MaxDiscount > 0 && discountAmount > appliedVoucher.MaxDiscount {
+			discountAmount = appliedVoucher.MaxDiscount
+		}
+
+		if discountAmount > originalAmount {
+			discountAmount = originalAmount
+		}
+		
+		finalAmount = originalAmount - discountAmount
+		voucherID = &appliedVoucher.ID
+	}
 	provider := body.Provider
 	if provider == "" {
 		provider = "midtrans"
@@ -883,18 +1084,28 @@ func (s *Server) handlePayments(w http.ResponseWriter, r *http.Request) {
 	}
 
 	payment := models.Payment{
-		ID:        newID(),
-		SessionID: body.SessionID,
-		Provider:  provider,
-		Amount:    body.Amount,
-		Currency:  currency,
-		Status:    "pending",
-		CreatedAt: now,
-		UpdatedAt: now,
+		ID:             newID(),
+		SessionID:      body.SessionID,
+		Provider:       provider,
+		Amount:         finalAmount,
+		Currency:       currency,
+		Status:         "pending",
+		VoucherID:      voucherID,
+		OriginalAmount: originalAmount,
+		DiscountAmount: discountAmount,
+		CreatedAt:      now,
+		UpdatedAt:      now,
 	}
-	if provider == "qris-simulation" {
+	if finalAmount <= 0 {
+		finalAmount = 0
+		payment.Amount = finalAmount
+		payment.Status = "paid"
+		provider = "free"
+		payment.Provider = provider
+	} else if provider == "qris-simulation" {
 		payment.Status = "paid"
 	}
+	
 	if provider == "midtrans" {
 		snapToken, checkoutURL, err := s.createMidtransSnap(r, payment, session)
 		if err != nil {
@@ -940,6 +1151,13 @@ func (s *Server) handlePayments(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "Failed to save payment.")
 		return
 	}
+	
+	// Increment used count
+	if appliedVoucher != nil {
+		appliedVoucher.UsedCount++
+		_ = s.store.UpsertVoucher(*appliedVoucher)
+	}
+
 	if err := s.insertPaymentLog(r, "payment.created", payment, nil, map[string]any{
 		"sessionId": payment.SessionID,
 		"provider":  payment.Provider,
@@ -1502,6 +1720,34 @@ func (s *Server) sendGalleryEmail(recipient string, downloadURL string) error {
 		"Content-Type: text/plain; charset=UTF-8",
 		"",
 		body,
+	}, "\r\n")
+
+	host := strings.TrimSpace(s.cfg.SMTPHost)
+	port := strings.TrimSpace(s.cfg.SMTPPort)
+	if port == "" {
+		port = "587"
+	}
+	auth := smtp.PlainAuth("", strings.TrimSpace(s.cfg.SMTPUsername), strings.TrimSpace(s.cfg.SMTPPassword), host)
+	return smtp.SendMail(host+":"+port, auth, envelopeFrom, []string{recipient}, []byte(message))
+}
+
+func (s *Server) sendEmail(recipient string, subject string, text string) error {
+	from := strings.TrimSpace(s.cfg.MailFrom)
+	if from == "" {
+		from = strings.TrimSpace(s.cfg.SMTPUsername)
+	}
+	envelopeFrom := from
+	if parsedFrom, err := mail.ParseAddress(from); err == nil {
+		envelopeFrom = parsedFrom.Address
+	}
+	message := strings.Join([]string{
+		"From: " + from,
+		"To: " + recipient,
+		"Subject: " + subject,
+		"MIME-Version: 1.0",
+		"Content-Type: text/plain; charset=UTF-8",
+		"",
+		text,
 	}, "\r\n")
 
 	host := strings.TrimSpace(s.cfg.SMTPHost)
@@ -2135,6 +2381,7 @@ func (s *Server) upsertVoucher(w http.ResponseWriter, r *http.Request, voucherID
 		Active:      active,
 		StartsAt:    body.StartsAt,
 		EndsAt:      body.EndsAt,
+		CreatedBy:   actorID,
 		CreatedAt:   createdAt,
 		UpdatedAt:   now,
 	}
@@ -2946,3 +3193,406 @@ func (s *Server) recordMonitoringError(r *http.Request, category string, resourc
 	metadata["source"] = "backend"
 	s.auditWithMetadata(r, nil, "monitoring.error."+category, resource, false, metadata)
 }
+
+// Wallet Handlers
+
+func (s *Server) handleAdminWallet(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+	settings := s.store.GetWalletSettings()
+	withdrawals := s.store.ListWithdrawals()
+
+	payments := s.store.ListPayments()
+	var totalEarnings int64 = 0
+	for _, p := range payments {
+		if p.Status == "settlement" || p.Status == "paid" {
+			totalEarnings += p.Amount
+		}
+	}
+
+	var totalWithdrawn int64 = 0
+	for _, w := range withdrawals {
+		if w.Status != "failed" {
+			totalWithdrawn += w.Amount
+		}
+	}
+
+	balance := totalEarnings - totalWithdrawn
+
+	writeJSON(w, http.StatusOK, response{Data: map[string]interface{}{
+		"settings":      settings,
+		"withdrawals":   withdrawals,
+		"totalEarnings": totalEarnings,
+		"balance":       balance,
+	}})
+}
+
+func (s *Server) handleAdminWalletSettings(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPut {
+		writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+	var settings models.WalletSettings
+	if err := json.NewDecoder(r.Body).Decode(&settings); err != nil {
+		writeError(w, http.StatusBadRequest, "Invalid JSON payload")
+		return
+	}
+	if err := s.store.SaveWalletSettings(settings); err != nil {
+		writeError(w, http.StatusInternalServerError, "Failed to save settings")
+		return
+	}
+	
+	_ = s.store.InsertAuditLog(models.AuditLog{
+		ID:        fmt.Sprintf("%d", time.Now().UnixNano()),
+		Action:    "UPDATE_WALLET_SETTINGS",
+		Success:   true,
+		CreatedAt: time.Now(),
+	})
+	
+	writeJSON(w, http.StatusOK, response{Data: settings})
+}
+
+func (s *Server) handleAdminWalletWithdraw(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+	var req struct {
+		Amount int64 `json:"amount"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "Invalid JSON payload")
+		return
+	}
+	if req.Amount < 10000 {
+		writeError(w, http.StatusBadRequest, "Minimum penarikan adalah Rp 10.000")
+		return
+	}
+
+	// Calculate balance
+	payments := s.store.ListPayments()
+	var totalEarnings int64 = 0
+	for _, p := range payments {
+		if p.Status == "settlement" || p.Status == "paid" {
+			totalEarnings += p.Amount
+		}
+	}
+	withdrawals := s.store.ListWithdrawals()
+	var totalWithdrawn int64 = 0
+	for _, wd := range withdrawals {
+		if wd.Status != "failed" {
+			totalWithdrawn += wd.Amount
+		}
+	}
+	balance := totalEarnings - totalWithdrawn
+	
+	if req.Amount > balance {
+		writeError(w, http.StatusBadRequest, "Saldo tidak mencukupi")
+		return
+	}
+
+	withdrawal := models.Withdrawal{
+		ID:        "WD-" + fmt.Sprintf("%d", time.Now().UnixNano())[:8],
+		Amount:    req.Amount,
+		Fee:       0,
+		Status:    "pending",
+		Reference: "",
+		CreatedAt: time.Now(),
+	}
+
+	if err := s.store.InsertWithdrawal(withdrawal); err != nil {
+		writeError(w, http.StatusInternalServerError, "Gagal memproses penarikan")
+		return
+	}
+	
+	_ = s.store.InsertAuditLog(models.AuditLog{
+		ID:        fmt.Sprintf("%d", time.Now().UnixNano()),
+		Action:    "CREATE_WITHDRAWAL",
+		Success:   true,
+		CreatedAt: time.Now(),
+	})
+	
+	writeJSON(w, http.StatusCreated, response{Data: withdrawal})
+}
+
+// Restored Handlers
+
+func (s *Server) handleAdminFrameUpload(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+
+	if err := r.ParseMultipartForm(10 << 20); err != nil {
+		writeError(w, http.StatusBadRequest, "File too large or invalid form")
+		return
+	}
+
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "Missing 'file' field")
+		return
+	}
+	defer file.Close()
+
+	ext := filepath.Ext(header.Filename)
+	if ext == "" {
+		ext = ".png"
+	}
+	filename := fmt.Sprintf("%d%s", time.Now().UnixNano(), ext)
+	
+	framesDir := filepath.Join(s.cfg.StorageDir, "frames")
+	if err := os.MkdirAll(framesDir, 0755); err != nil {
+		writeError(w, http.StatusInternalServerError, "Could not create directory")
+		return
+	}
+	
+	destPath := filepath.Join(framesDir, filename)
+	destFile, err := os.Create(destPath)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "Could not save file")
+		return
+	}
+	defer destFile.Close()
+
+	if _, err := io.Copy(destFile, file); err != nil {
+		writeError(w, http.StatusInternalServerError, "Could not write file")
+		return
+	}
+
+	fileURL := s.cfg.PublicBaseURL + "/files/frames/" + filename
+	writeJSON(w, http.StatusOK, response{Data: map[string]string{"url": fileURL}})
+}
+
+func (s *Server) handleAdminFilters(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, http.StatusOK, response{Data: s.store.ListFilters()})
+	case http.MethodPost:
+		var filter models.Filter
+		if err := json.NewDecoder(r.Body).Decode(&filter); err != nil {
+			writeError(w, http.StatusBadRequest, "Invalid JSON payload")
+			return
+		}
+		filter.CreatedAt = time.Now()
+		filter.UpdatedAt = time.Now()
+		if err := s.store.UpsertFilter(filter); err != nil {
+			writeError(w, http.StatusInternalServerError, "Failed to save filter")
+			return
+		}
+		writeJSON(w, http.StatusCreated, response{Data: filter})
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+	}
+}
+
+func (s *Server) handleAdminFilterByID(w http.ResponseWriter, r *http.Request) {
+	filterID, _ := pathIDAndAction(r.URL.Path, "/api/admin/filters/")
+	switch r.Method {
+	case http.MethodPut:
+		var filter models.Filter
+		if err := json.NewDecoder(r.Body).Decode(&filter); err != nil {
+			writeError(w, http.StatusBadRequest, "Invalid JSON payload")
+			return
+		}
+		filter.ID = filterID
+		filter.UpdatedAt = time.Now()
+		if err := s.store.UpsertFilter(filter); err != nil {
+			writeError(w, http.StatusInternalServerError, "Failed to update filter")
+			return
+		}
+		writeJSON(w, http.StatusOK, response{Data: filter})
+	case http.MethodDelete:
+		if err := s.store.DeleteFilter(filterID); err != nil {
+			writeError(w, http.StatusInternalServerError, "Failed to delete filter")
+			return
+		}
+		writeJSON(w, http.StatusOK, response{Data: map[string]string{"message": "Deleted"}})
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+	}
+}
+
+func (s *Server) handleAdminBulkDeleteVouchers(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "Method not allowed.")
+		return
+	}
+	var req struct {
+		IDs []string `json:"ids"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "Invalid JSON payload.")
+		return
+	}
+	deletedCount := 0
+	for _, id := range req.IDs {
+		if err := s.store.DeleteVoucher(id); err == nil {
+			deletedCount++
+		}
+	}
+	writeJSON(w, http.StatusOK, response{Data: map[string]int{"deleted": deletedCount}})
+}
+
+func (s *Server) handleAdminSubscriptions(w http.ResponseWriter, r *http.Request) {
+	_, err := s.requireAdmin(r)
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, err.Error())
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, http.StatusOK, response{Data: s.store.ListSubscriptions()})
+	case http.MethodPost:
+		var sub models.Subscription
+		if err := json.NewDecoder(r.Body).Decode(&sub); err != nil {
+			writeError(w, http.StatusBadRequest, "Invalid request payload")
+			return
+		}
+		if sub.ID == "" {
+			sub.ID = "sub_" + shortCode()
+		}
+		sub.CreatedAt = time.Now()
+		sub.UpdatedAt = time.Now()
+		if err := s.store.UpsertSubscription(sub); err != nil {
+			writeError(w, http.StatusInternalServerError, "Failed to create subscription")
+			return
+		}
+		writeJSON(w, http.StatusOK, response{Data: sub})
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+	}
+}
+
+func (s *Server) handleAdminSubscriptionByID(w http.ResponseWriter, r *http.Request) {
+	_, err := s.requireAdmin(r)
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, err.Error())
+		return
+	}
+
+	subID, _ := pathIDAndAction(r.URL.Path, "/api/admin/subscriptions/")
+	switch r.Method {
+	case http.MethodPut:
+		var sub models.Subscription
+		if err := json.NewDecoder(r.Body).Decode(&sub); err != nil {
+			writeError(w, http.StatusBadRequest, "Invalid request payload")
+			return
+		}
+		sub.ID = subID
+		sub.UpdatedAt = time.Now()
+		if err := s.store.UpsertSubscription(sub); err != nil {
+			writeError(w, http.StatusInternalServerError, "Failed to update subscription")
+			return
+		}
+		writeJSON(w, http.StatusOK, response{Data: sub})
+	case http.MethodDelete:
+		if err := s.store.DeleteSubscription(subID); err != nil {
+			writeError(w, http.StatusInternalServerError, "Failed to delete subscription")
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+	}
+}
+
+func (s *Server) handleAdminPaymentKeys(w http.ResponseWriter, r *http.Request) {
+	_, err := s.requireAdmin(r)
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, err.Error())
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, http.StatusOK, response{Data: s.store.GetPaymentKey()})
+	case http.MethodPut:
+		var key models.PaymentKey
+		if err := json.NewDecoder(r.Body).Decode(&key); err != nil {
+			writeError(w, http.StatusBadRequest, "Invalid request payload")
+			return
+		}
+		if err := s.store.SavePaymentKey(key); err != nil {
+			writeError(w, http.StatusInternalServerError, "Failed to save payment keys")
+			return
+		}
+		writeJSON(w, http.StatusOK, response{Data: key})
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+	}
+}
+
+func (s *Server) handleAdminFramesGif(w http.ResponseWriter, r *http.Request) {
+	_, err := s.requireAdmin(r)
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, err.Error())
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, http.StatusOK, response{Data: s.store.ListFramesGif()})
+	case http.MethodPost:
+		var frame models.FrameGif
+		if err := json.NewDecoder(r.Body).Decode(&frame); err != nil {
+			writeError(w, http.StatusBadRequest, "Invalid request payload")
+			return
+		}
+		if frame.ID == "" {
+			frame.ID = "custom_" + shortCode()
+		}
+		frame.CreatedAt = time.Now()
+		frame.UpdatedAt = time.Now()
+		if err := s.store.UpsertFrameGif(frame); err != nil {
+			writeError(w, http.StatusInternalServerError, "Failed to create frame gif")
+			return
+		}
+		writeJSON(w, http.StatusOK, response{Data: frame})
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+	}
+}
+
+func (s *Server) handleAdminFrameGifByID(w http.ResponseWriter, r *http.Request) {
+	_, err := s.requireAdmin(r)
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, err.Error())
+		return
+	}
+
+	frameID, _ := pathIDAndAction(r.URL.Path, "/api/admin/frames_gif/")
+	switch r.Method {
+	case http.MethodPut:
+		var frame models.FrameGif
+		if err := json.NewDecoder(r.Body).Decode(&frame); err != nil {
+			writeError(w, http.StatusBadRequest, "Invalid request payload")
+			return
+		}
+		frame.ID = frameID
+		frame.UpdatedAt = time.Now()
+		if err := s.store.UpsertFrameGif(frame); err != nil {
+			writeError(w, http.StatusInternalServerError, "Failed to update frame gif")
+			return
+		}
+		writeJSON(w, http.StatusOK, response{Data: frame})
+	case http.MethodDelete:
+		if err := s.store.DeleteFrameGif(frameID); err != nil {
+			writeError(w, http.StatusInternalServerError, "Failed to delete frame gif")
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+	}
+}
+
+func (s *Server) handleAdminFrameGifUpload(w http.ResponseWriter, r *http.Request) {
+	// Re-use handleAdminFrameUpload logic but return custom URL
+	// For simplicity, we just use the existing handleAdminFrameUpload because it uploads to the exact same storage bucket
+	s.handleAdminFrameUpload(w, r)
+}
+

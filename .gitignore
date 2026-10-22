@@ -1,5 +1,10 @@
 node_modules/
 dist/
+src-tauri/target/
+hardware-agent/dist/
+hardware-agent/vendor/edsdk/
+hardware-agent/src/HardwareAgent/bin/
+hardware-agent/src/HardwareAgent/obj/
 backend/.env
 backend/data/
 backend/storage/
@@ -8,3 +13,16 @@ backend/backend/data/
 backend/backend/storage/
 .vercel
 .env*
+!.env.development
+
+# OS / editor junk
+.DS_Store
+*.swp
+*.swo
+
+# Build outputs and compiled binaries
+backend/bin/
+backend/dist/
+backend/release/
+*.exe
+.wrangler/

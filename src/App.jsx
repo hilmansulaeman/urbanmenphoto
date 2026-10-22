@@ -11,6 +11,7 @@ import FilterPanel from './components/FilterPanel.jsx';
 import { FILTERS } from './utils/photoConfig.js';
 import MobileGalleryView from './components/MobileGalleryView.jsx';
 import AdminDashboard from './components/AdminDashboard.jsx';
+import { syncKioskSettings } from './utils/kioskConfig.js';
 
 const STEPS = {
   IDLE: 'IDLE',
@@ -33,65 +34,6 @@ function formatRemainingTime(milliseconds) {
   return `${minutes}:${String(seconds).padStart(2, '0')}`;
 }
 
-function FullscreenToggle() {
-  const [isFullscreen, setIsFullscreen] = useState(false);
-
-  useEffect(() => {
-    const updateFullscreenState = () => {
-      setIsFullscreen(Boolean(document.fullscreenElement || document.webkitFullscreenElement));
-    };
-
-    updateFullscreenState();
-    document.addEventListener('fullscreenchange', updateFullscreenState);
-    document.addEventListener('webkitfullscreenchange', updateFullscreenState);
-
-    return () => {
-      document.removeEventListener('fullscreenchange', updateFullscreenState);
-      document.removeEventListener('webkitfullscreenchange', updateFullscreenState);
-    };
-  }, []);
-
-  const toggleFullscreen = async () => {
-    const root = document.documentElement;
-    const requestFullscreen = root.requestFullscreen || root.webkitRequestFullscreen;
-    const exitFullscreen = document.exitFullscreen || document.webkitExitFullscreen;
-
-    try {
-      if (document.fullscreenElement || document.webkitFullscreenElement) {
-        await exitFullscreen?.call(document);
-      } else {
-        await requestFullscreen?.call(root);
-      }
-    } catch (err) {
-      console.warn('Fullscreen toggle was blocked by the browser.', err);
-    }
-  };
-
-  return (
-    <button
-      className="fullscreen-toggle"
-      type="button"
-      aria-label={isFullscreen ? 'Keluar fullscreen' : 'Masuk fullscreen'}
-      onClick={toggleFullscreen}
-    >
-      {isFullscreen ? (
-        <svg viewBox="0 0 24 24" aria-hidden="true">
-          <path d="M9 4v5H4" />
-          <path d="M4 9l6-6" />
-          <path d="M15 20v-5h5" />
-          <path d="M20 15l-6 6" />
-        </svg>
-      ) : (
-        <svg viewBox="0 0 24 24" aria-hidden="true">
-          <path d="M4 9V4h5" />
-          <path d="M4 4l6 6" />
-          <path d="M20 15v5h-5" />
-          <path d="M20 20l-6-6" />
-        </svg>
-      )}
-    </button>
-  );
-}
 
 export default function App() {
   // Simple router for client gallery and admin
@@ -99,6 +41,10 @@ export default function App() {
   const sessionId = isGalleryRoute ? window.location.pathname.split('/gallery/')[1] : null;
 
   const isAdminRoute = window.location.pathname.startsWith('/admin');
+
+  useEffect(() => {
+    syncKioskSettings();
+  }, []);
 
   if (isGalleryRoute && sessionId) {
     return <MobileGalleryView sessionId={sessionId} />;
@@ -341,7 +287,7 @@ export default function App() {
         ) : null}
       </header>
 
-      <FullscreenToggle />
+
       {renderStep()}
     </main>
   );

@@ -4,6 +4,12 @@ Potobox adalah web photobooth frontend berbasis React + Vite. Aplikasi berjalan 
 
 ## DSLR tethering (Canon USB)
 
+## Kiosk App Windows (Electron + WebUSB)
+
+`npm run desktop:dist` membuat installer Windows **Urbanmen Photo Kiosk**. Aplikasi ini menjalankan sesi customer dalam jendela fullscreen dan memuat deployment staging Urbanmen Photo, sehingga API web tidak diarahkan ke `file://` atau backend lokal yang tidak aktif. Kamera direct WebUSB membutuhkan driver WinUSB dari Zadig; printer tetap memakai driver resmi Windows.
+
+Saat pengembangan, jalankan backend kiosk lokal terlebih dahulu pada `127.0.0.1:8787`, lalu jalankan `npm run desktop:dev`. Untuk produksi, gunakan `npm run desktop:dist` di Windows untuk menghasilkan installer NSIS.
+
 Untuk memakai Canon EOS lewat kabel USB, instal `gphoto2` pada komputer yang menjalankan backend (`brew install gphoto2` di macOS atau `sudo apt install gphoto2` di Debian/Ubuntu). Nyalakan kamera, hubungkan dengan kabel USB data, kemudian di Admin → Camera Device Booth klik **Refresh Kamera**, pilih **DSLR Tethering (USB)** dan pilih port Canon yang muncul. DSLR mengambil foto asli saat shutter booth ditekan; live preview browser tidak tersedia melalui tethering USB.
 
 DSLR tidak dapat dipakai dari frontend Vercel karena server cloud tidak memiliki akses ke USB kamera. Jalankan mode kiosk di komputer booth, lalu buka `http://localhost:8787`:
@@ -14,13 +20,45 @@ npm run kiosk:start
 
 Perintah ini membangun frontend dan menyajikannya dari backend lokal pada origin yang sama dengan layanan tethering.
 
-Untuk test dari HP atau jaringan luar, gunakan URL HTTPS sementara dari Cloudflare Tunnel setelah kiosk hidup:
+Untuk produksi booth, jalankan frontend, backend Go, dan Hardware Agent pada mini PC yang sama. Kamera dan printer hanya berkomunikasi melalui `localhost`, sehingga tidak membutuhkan Cloudflare Tunnel atau akses internet untuk proses capture/cetak.
 
-```bash
-cloudflared tunnel --url http://localhost:8787
+### Supabase Storage
+
+Backend kiosk dapat mengunggah foto DSLR dan hasil final langsung ke Supabase Storage. Buat bucket public bernama `potobox-galleries`, lalu isi variabel berikut pada `backend/.env` di Mac booth:
+
+```env
+SUPABASE_URL=https://your-project-id.supabase.co
+SUPABASE_SERVICE_ROLE_KEY=your-service-role-key
+SUPABASE_BUCKET=potobox-galleries
 ```
 
-Buka URL `https://...trycloudflare.com` yang dicetak perintah tersebut. Tunnel hanya untuk testing: URL berubah saat proses dihentikan dan jangan gunakan untuk admin atau pembayaran produksi.
+`SUPABASE_SERVICE_ROLE_KEY` hanya untuk backend lokal dan tidak boleh memakai prefix `VITE_` atau dimasukkan ke Vercel. Saat variabel tidak diisi, backend tetap memakai folder lokal sebagai fallback.
+
+### Camera Agent untuk Windows (fase 1)
+
+Untuk booth Canon dengan driver **WinUSB dari Zadig**, jalankan `camera-agent.exe` di PC Windows yang tersambung langsung ke DSLR. Agent menggunakan `gphoto2`/libgphoto2 dan menyediakan `GET /api/cameras` serta `POST /api/cameras/{id}/capture` secara lokal pada `127.0.0.1:8787`.
+
+Salin `camera-agent.env.example` menjadi `camera-agent.env`, set `CAMERA_PROVIDER=gphoto2`, `CAMERA_AGENT_STORAGE=local`, dan path `gphoto2.exe`. Set `VITE_HARDWARE_AGENT_URL=http://127.0.0.1:8787` saat membangun frontend booth. Fase ini tidak membutuhkan EDSDK, digiCamControl, Cloudflare Tunnel, atau kredensial Supabase.
+
+### Dua DSLR Canon pada satu booth
+
+Untuk Canon 1200D dan 4000D, gunakan **DSLR lewat Camera Agent** untuk *kedua* posisi kamera. Mode **DSLR langsung (Zadig / Chrome)** hanya mendukung satu kamera aktif karena WebUSB/browser tidak menyimpan koneksi terpisah yang stabil untuk dua DSLR.
+
+1. Sambungkan masing-masing kamera dengan kabel USB data yang berbeda (sebaiknya ke port komputer atau powered USB hub), nyalakan keduanya, dan tutup Canon EOS Utility atau aplikasi lain yang mungkin sedang mengunci kamera.
+2. Pilih `CAMERA_PROVIDER=gphoto2` pada `camera-agent.env`, lalu jalankan `gphoto2 --auto-detect`. Harus muncul dua baris dengan port berbeda, misalnya `usb:001,004` dan `usb:001,005`.
+3. Jalankan/restart Camera Agent. Di Admin → **Camera Device Booth**, tekan **Refresh Kamera**. Atur Posisi Kamera 1 dan 2 menjadi **DSLR lewat Camera Agent**, lalu pilih port USB yang berbeda untuk masing-masing kamera dan simpan pengaturan.
+
+Jika `gphoto2 --auto-detect` masih hanya menampilkan satu kamera, aplikasi web belum dapat menambahkan kamera kedua. Periksa kabel/port USB, gunakan powered hub, dan pastikan kedua kamera terlihat di Device Manager sebelum membuka Camera Agent.
+
+Alternatif agent juga mendukung gphoto2. Instal [MSYS2](https://www.msys2.org/), buka terminal **MSYS2 UCRT64**, lalu jalankan:
+
+```bash
+pacman -Syu
+pacman -S mingw-w64-ucrt-x86_64-gphoto2
+gphoto2 --auto-detect
+```
+
+Untuk instalasi booth lokal, gunakan `hardware-agent/` berbasis .NET. Jalankan Hardware Agent di mini PC pada `127.0.0.1:8790`, lalu set `HARDWARE_AGENT_URL=http://127.0.0.1:8790` pada backend Go. Browser kiosk cukup membuka `http://localhost:8787`; tidak ada URL Camera Agent atau Cloudflare Tunnel yang perlu diisi.
 
 ## Fitur
 

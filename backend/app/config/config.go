@@ -8,29 +8,34 @@ import (
 )
 
 type Config struct {
-	Host                 string
-	Port                 string
-	PublicBaseURL        string
-	PaymentWebhookSecret string
-	MidtransServerKey    string
-	MidtransClientKey    string
-	MidtransEnvironment  string
-	AllowedOrigins       []string
-	DatabaseURL          string
-	DataDir              string
-	StorageDir           string
-	FrontendDistDir      string
-	BootstrapAdminEmail  string
-	BootstrapAdminPass   string
-	SMTPHost             string
-	SMTPPort             string
-	SMTPUsername         string
-	SMTPPassword         string
-	MailFrom             string
-	SessionTTLDays       int
-	AdminTokenTTLHrs     int
-	MaxBodyBytes         int64
-	CleanupIntervalMins  int
+	Host                   string
+	Port                   string
+	PublicBaseURL          string
+	PaymentWebhookSecret   string
+	MidtransServerKey      string
+	MidtransClientKey      string
+	MidtransEnvironment    string
+	AllowedOrigins         []string
+	DatabaseURL            string
+	DataDir                string
+	StorageDir             string
+	SupabaseURL            string
+	SupabaseServiceRoleKey string
+	SupabaseBucket         string
+	FrontendDistDir        string
+	BootstrapAdminEmail    string
+	BootstrapAdminPass     string
+	SMTPHost               string
+	SMTPPort               string
+	SMTPUsername           string
+	SMTPPassword           string
+	MailFrom               string
+	SessionTTLDays         int
+	AdminTokenTTLHrs       int
+	MaxBodyBytes           int64
+	CleanupIntervalMins    int
+	HardwareAgentURL       string
+	HardwareAgentAPIKey    string
 }
 
 const SessionRetentionDays = 7
@@ -43,29 +48,34 @@ func Load() Config {
 	defaultDataDir, defaultStorageDir := defaultRuntimeDirs()
 
 	return Config{
-		Host:                 host,
-		Port:                 port,
-		PublicBaseURL:        getEnv("PUBLIC_BASE_URL", "http://localhost:"+port),
-		PaymentWebhookSecret: os.Getenv("PAYMENT_WEBHOOK_SECRET"),
-		MidtransServerKey:    os.Getenv("MIDTRANS_SERVER_KEY"),
-		MidtransClientKey:    os.Getenv("MIDTRANS_CLIENT_KEY"),
-		MidtransEnvironment:  getEnv("MIDTRANS_ENVIRONMENT", "sandbox"),
-		AllowedOrigins:       splitCSV(os.Getenv("ALLOWED_ORIGINS")),
-		DatabaseURL:          os.Getenv("DATABASE_URL"),
-		DataDir:              getEnv("BACKEND_DATA_DIR", defaultDataDir),
-		StorageDir:           getEnv("BACKEND_STORAGE_DIR", defaultStorageDir),
-		FrontendDistDir:      getEnv("FRONTEND_DIST_DIR", defaultFrontendDistDir()),
-		BootstrapAdminEmail:  strings.ToLower(strings.TrimSpace(os.Getenv("BOOTSTRAP_ADMIN_EMAIL"))),
-		BootstrapAdminPass:   os.Getenv("BOOTSTRAP_ADMIN_PASSWORD"),
-		SMTPHost:             os.Getenv("SMTP_HOST"),
-		SMTPPort:             getEnv("SMTP_PORT", "587"),
-		SMTPUsername:         os.Getenv("SMTP_USERNAME"),
-		SMTPPassword:         os.Getenv("SMTP_PASSWORD"),
-		MailFrom:             getEnv("MAIL_FROM", os.Getenv("SMTP_USERNAME")),
-		SessionTTLDays:       SessionRetentionDays,
-		AdminTokenTTLHrs:     getEnvInt("ADMIN_TOKEN_TTL_HOURS", 12),
-		MaxBodyBytes:         int64(getEnvInt("MAX_BODY_BYTES", 40*1024*1024)),
-		CleanupIntervalMins:  getEnvIntAllowZero("CLEANUP_INTERVAL_MINUTES", 60),
+		Host:                   host,
+		Port:                   port,
+		PublicBaseURL:          getEnv("PUBLIC_BASE_URL", "http://localhost:"+port),
+		PaymentWebhookSecret:   os.Getenv("PAYMENT_WEBHOOK_SECRET"),
+		MidtransServerKey:      os.Getenv("MIDTRANS_SERVER_KEY"),
+		MidtransClientKey:      os.Getenv("MIDTRANS_CLIENT_KEY"),
+		MidtransEnvironment:    getEnv("MIDTRANS_ENVIRONMENT", "sandbox"),
+		AllowedOrigins:         splitCSV(os.Getenv("ALLOWED_ORIGINS")),
+		DatabaseURL:            os.Getenv("DATABASE_URL"),
+		DataDir:                getEnv("BACKEND_DATA_DIR", defaultDataDir),
+		StorageDir:             getEnv("BACKEND_STORAGE_DIR", defaultStorageDir),
+		SupabaseURL:            strings.TrimRight(strings.TrimSpace(os.Getenv("SUPABASE_URL")), "/"),
+		SupabaseServiceRoleKey: strings.TrimSpace(os.Getenv("SUPABASE_SERVICE_ROLE_KEY")),
+		SupabaseBucket:         getEnv("SUPABASE_BUCKET", "potobox-galleries"),
+		FrontendDistDir:        getEnv("FRONTEND_DIST_DIR", defaultFrontendDistDir()),
+		BootstrapAdminEmail:    strings.ToLower(strings.TrimSpace(os.Getenv("BOOTSTRAP_ADMIN_EMAIL"))),
+		BootstrapAdminPass:     os.Getenv("BOOTSTRAP_ADMIN_PASSWORD"),
+		SMTPHost:               os.Getenv("SMTP_HOST"),
+		SMTPPort:               getEnv("SMTP_PORT", "587"),
+		SMTPUsername:           os.Getenv("SMTP_USERNAME"),
+		SMTPPassword:           os.Getenv("SMTP_PASSWORD"),
+		MailFrom:               getEnv("MAIL_FROM", os.Getenv("SMTP_USERNAME")),
+		SessionTTLDays:         SessionRetentionDays,
+		AdminTokenTTLHrs:       getEnvInt("ADMIN_TOKEN_TTL_HOURS", 12),
+		MaxBodyBytes:           int64(getEnvInt("MAX_BODY_BYTES", 40*1024*1024)),
+		CleanupIntervalMins:    getEnvIntAllowZero("CLEANUP_INTERVAL_MINUTES", 60),
+		HardwareAgentURL:       strings.TrimRight(strings.TrimSpace(os.Getenv("HARDWARE_AGENT_URL")), "/"),
+		HardwareAgentAPIKey:    strings.TrimSpace(os.Getenv("HARDWARE_AGENT_API_KEY")),
 	}
 }
 

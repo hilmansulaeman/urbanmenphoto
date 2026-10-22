@@ -183,7 +183,7 @@ func (s *PostgresStore) MessagesBySession(sessionID string) []models.Message {
 func (s *PostgresStore) ListPayments() []models.Payment {
 	rows, err := s.db.Query(`
 		SELECT id, session_id, provider, amount, currency, status,
-		       provider_reference, snap_token, checkout_url, created_at, updated_at
+		       provider_reference, snap_token, checkout_url, voucher_id, original_amount, discount_amount, created_at, updated_at
 		FROM payments
 		ORDER BY created_at DESC
 		LIMIT 500
@@ -198,7 +198,7 @@ func (s *PostgresStore) ListPayments() []models.Payment {
 func (s *PostgresStore) FindPayment(id string) (models.Payment, bool) {
 	row := s.db.QueryRow(`
 		SELECT id, session_id, provider, amount, currency, status,
-		       provider_reference, snap_token, checkout_url, created_at, updated_at
+		       provider_reference, snap_token, checkout_url, voucher_id, original_amount, discount_amount, created_at, updated_at
 		FROM payments
 		WHERE id = $1
 	`, id)
@@ -209,7 +209,7 @@ func (s *PostgresStore) FindPayment(id string) (models.Payment, bool) {
 func (s *PostgresStore) PaymentsBySession(sessionID string) []models.Payment {
 	rows, err := s.db.Query(`
 		SELECT id, session_id, provider, amount, currency, status,
-		       provider_reference, snap_token, checkout_url, created_at, updated_at
+		       provider_reference, snap_token, checkout_url, voucher_id, original_amount, discount_amount, created_at, updated_at
 		FROM payments
 		WHERE session_id = $1
 		ORDER BY created_at DESC
@@ -225,11 +225,11 @@ func (s *PostgresStore) InsertPayment(payment models.Payment) error {
 	_, err := s.db.Exec(`
 		INSERT INTO payments (
 			id, session_id, provider, amount, currency, status,
-			provider_reference, snap_token, checkout_url, created_at, updated_at
+			provider_reference, snap_token, checkout_url, voucher_id, original_amount, discount_amount, created_at, updated_at
 		)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
 	`, payment.ID, payment.SessionID, payment.Provider, payment.Amount, payment.Currency, payment.Status,
-		payment.ProviderRef, payment.SnapToken, payment.CheckoutURL, payment.CreatedAt, payment.UpdatedAt)
+		payment.ProviderRef, payment.SnapToken, payment.CheckoutURL, payment.VoucherID, payment.OriginalAmount, payment.DiscountAmount, payment.CreatedAt, payment.UpdatedAt)
 	return err
 }
 
@@ -237,10 +237,10 @@ func (s *PostgresStore) UpdatePayment(payment models.Payment) error {
 	_, err := s.db.Exec(`
 		UPDATE payments
 		SET provider=$2, amount=$3, currency=$4, status=$5,
-		    provider_reference=$6, snap_token=$7, checkout_url=$8, updated_at=$9
+		    provider_reference=$6, snap_token=$7, checkout_url=$8, voucher_id=$9, original_amount=$10, discount_amount=$11, updated_at=$12
 		WHERE id=$1
 	`, payment.ID, payment.Provider, payment.Amount, payment.Currency, payment.Status,
-		payment.ProviderRef, payment.SnapToken, payment.CheckoutURL, payment.UpdatedAt)
+		payment.ProviderRef, payment.SnapToken, payment.CheckoutURL, payment.VoucherID, payment.OriginalAmount, payment.DiscountAmount, payment.UpdatedAt)
 	return err
 }
 
@@ -351,8 +351,7 @@ func (s *PostgresStore) DeleteFrame(id string) error {
 
 func (s *PostgresStore) ListVouchers() []models.Voucher {
 	rows, err := s.db.Query(`
-		SELECT id, code, name, type, value, min_amount, max_discount,
-		       usage_limit, used_count, active, starts_at, ends_at, created_at, updated_at
+		SELECT id, code, name, type, value, min_amount, max_discount, usage_limit, used_count, active, created_by, starts_at, ends_at, created_at, updated_at
 		FROM vouchers
 		ORDER BY created_at DESC
 	`)
@@ -365,27 +364,19 @@ func (s *PostgresStore) ListVouchers() []models.Voucher {
 	for rows.Next() {
 		var voucher models.Voucher
 		var startsAt, endsAt sql.NullTime
+		var createdBy sql.NullString
 		if err := rows.Scan(
-			&voucher.ID,
-			&voucher.Code,
-			&voucher.Name,
-			&voucher.Type,
-			&voucher.Value,
-			&voucher.MinAmount,
-			&voucher.MaxDiscount,
-			&voucher.UsageLimit,
-			&voucher.UsedCount,
-			&voucher.Active,
-			&startsAt,
-			&endsAt,
-			&voucher.CreatedAt,
-			&voucher.UpdatedAt,
+			&voucher.ID, &voucher.Code, &voucher.Name, &voucher.Type, &voucher.Value, &voucher.MinAmount,
+			&voucher.MaxDiscount, &voucher.UsageLimit, &voucher.UsedCount, &voucher.Active, &createdBy, &startsAt, &endsAt, &voucher.CreatedAt, &voucher.UpdatedAt,
 		); err == nil {
 			if startsAt.Valid {
 				voucher.StartsAt = &startsAt.Time
 			}
 			if endsAt.Valid {
 				voucher.EndsAt = &endsAt.Time
+			}
+			if createdBy.Valid {
+				voucher.CreatedBy = &createdBy.String
 			}
 			vouchers = append(vouchers, voucher)
 		}
@@ -397,9 +388,9 @@ func (s *PostgresStore) UpsertVoucher(voucher models.Voucher) error {
 	_, err := s.db.Exec(`
 		INSERT INTO vouchers (
 			id, code, name, type, value, min_amount, max_discount,
-			usage_limit, used_count, active, starts_at, ends_at, created_at, updated_at
+			usage_limit, used_count, active, created_by, starts_at, ends_at, created_at, updated_at
 		)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
 		ON CONFLICT (id) DO UPDATE SET
 			code=EXCLUDED.code,
 			name=EXCLUDED.name,
@@ -410,13 +401,29 @@ func (s *PostgresStore) UpsertVoucher(voucher models.Voucher) error {
 			usage_limit=EXCLUDED.usage_limit,
 			used_count=EXCLUDED.used_count,
 			active=EXCLUDED.active,
+			created_by=EXCLUDED.created_by,
 			starts_at=EXCLUDED.starts_at,
 			ends_at=EXCLUDED.ends_at,
 			updated_at=EXCLUDED.updated_at
 	`, voucher.ID, voucher.Code, voucher.Name, voucher.Type, voucher.Value, voucher.MinAmount,
-		voucher.MaxDiscount, voucher.UsageLimit, voucher.UsedCount, voucher.Active,
+		voucher.MaxDiscount, voucher.UsageLimit, voucher.UsedCount, voucher.Active, voucher.CreatedBy,
 		voucher.StartsAt, voucher.EndsAt, voucher.CreatedAt, voucher.UpdatedAt)
 	return err
+}
+
+func (s *PostgresStore) DeleteFilter(id string) error {
+	result, err := s.db.Exec(`DELETE FROM filters WHERE id = $1`, id)
+	if err != nil {
+		return err
+	}
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rowsAffected == 0 {
+		return os.ErrNotExist
+	}
+	return nil
 }
 
 func (s *PostgresStore) DeleteVoucher(id string) error {
@@ -708,7 +715,7 @@ type paymentScanner interface {
 
 func scanPayment(scanner paymentScanner) (models.Payment, error) {
 	var payment models.Payment
-	var providerRef, snapToken, checkoutURL sql.NullString
+	var providerRef, snapToken, checkoutURL, voucherID sql.NullString
 	err := scanner.Scan(
 		&payment.ID,
 		&payment.SessionID,
@@ -719,12 +726,16 @@ func scanPayment(scanner paymentScanner) (models.Payment, error) {
 		&providerRef,
 		&snapToken,
 		&checkoutURL,
+		&voucherID,
+		&payment.OriginalAmount,
+		&payment.DiscountAmount,
 		&payment.CreatedAt,
 		&payment.UpdatedAt,
 	)
 	payment.ProviderRef = nullableStringPtr(providerRef)
 	payment.SnapToken = nullableStringPtr(snapToken)
 	payment.CheckoutURL = nullableStringPtr(checkoutURL)
+	payment.VoucherID = nullableStringPtr(voucherID)
 	return payment, err
 }
 
@@ -807,3 +818,126 @@ func itoa(value int) string {
 }
 
 var _ Store = (*PostgresStore)(nil)
+
+func (s *PostgresStore) ToggleTwoFactor(userID string, enabled bool) error {
+	_, err := s.db.Exec(`UPDATE admin_users SET two_factor_enabled = $1 WHERE id = $2`, enabled, userID)
+	return err
+}
+
+func (s *PostgresStore) UpsertLoginOTP(otp models.LoginOTP) error {
+	_, err := s.db.Exec(`
+		INSERT INTO login_otps (email, otp, expires_at, created_at)
+		VALUES ($1, $2, $3, $4)
+		ON CONFLICT (email) DO UPDATE SET
+			otp = EXCLUDED.otp,
+			expires_at = EXCLUDED.expires_at,
+			created_at = EXCLUDED.created_at
+	`, otp.Email, otp.OTP, otp.ExpiresAt, otp.CreatedAt)
+	return err
+}
+
+func (s *PostgresStore) VerifyLoginOTP(email, otp string) bool {
+	var expiresAt time.Time
+	err := s.db.QueryRow(`
+		SELECT expires_at FROM login_otps WHERE email = $1 AND otp = $2
+	`, email, otp).Scan(&expiresAt)
+	if err != nil {
+		return false
+	}
+	return time.Now().Before(expiresAt)
+}
+
+func (s *PostgresStore) DeleteLoginOTP(email string) error {
+	_, err := s.db.Exec(`DELETE FROM login_otps WHERE email = $1`, email)
+	return err
+}
+
+func (s *PostgresStore) GetWalletSettings() models.WalletSettings {
+	return models.WalletSettings{}
+}
+
+func (s *PostgresStore) SaveWalletSettings(settings models.WalletSettings) error {
+	return nil
+}
+
+func (s *PostgresStore) ListWithdrawals() []models.Withdrawal {
+	return []models.Withdrawal{}
+}
+
+func (s *PostgresStore) InsertWithdrawal(withdrawal models.Withdrawal) error {
+	return nil
+}
+
+func (s *PostgresStore) UpdateWithdrawal(withdrawal models.Withdrawal) error {
+	return nil
+}
+
+func (s *PostgresStore) WithdrawalsByAdmin(adminID string) []models.Withdrawal {
+	return []models.Withdrawal{}
+}
+
+func (s *PostgresStore) ListFilters() []models.Filter {
+	return []models.Filter{}
+}
+
+func (s *PostgresStore) UpsertFilter(filter models.Filter) error {
+	return nil
+}
+
+
+func (p *PostgresStore) GetDeviceSettings() map[string]any {
+	// Not implemented for postgres yet
+	return make(map[string]any)
+}
+
+func (p *PostgresStore) UpdateDeviceSettings(settings map[string]any) error {
+	// Not implemented for postgres yet
+	return nil
+}
+
+func (p *PostgresStore) CreateProject(project models.Project) error {
+	return nil
+}
+
+func (p *PostgresStore) ListProjects() []models.Project {
+	return []models.Project{}
+}
+
+func (p *PostgresStore) GetProject(id string) (models.Project, bool) {
+	return models.Project{}, false
+}
+
+func (p *PostgresStore) UpdateProject(project models.Project) error {
+	return nil
+}
+
+func (p *PostgresStore) DeleteProject(id string) error {
+	return nil
+}
+
+func (p *PostgresStore) ListSubscriptions() []models.Subscription {
+	return nil
+}
+func (p *PostgresStore) UpsertSubscription(sub models.Subscription) error {
+	return nil
+}
+func (p *PostgresStore) DeleteSubscription(id string) error {
+	return nil
+}
+
+func (p *PostgresStore) ListFramesGif() []models.FrameGif {
+	return nil
+}
+func (p *PostgresStore) UpsertFrameGif(frame models.FrameGif) error {
+	return nil
+}
+func (p *PostgresStore) DeleteFrameGif(id string) error {
+	return nil
+}
+
+func (p *PostgresStore) GetPaymentKey() models.PaymentKey {
+	return models.PaymentKey{}
+}
+func (p *PostgresStore) SavePaymentKey(key models.PaymentKey) error {
+	return nil
+}

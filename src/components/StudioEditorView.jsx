@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { PHOTO_MODES, PAPER_SIZES, FRAMES } from '../utils/photoConfig.js';
+import { PHOTO_MODES, PAPER_SIZES, FILTER_CATEGORIES, getEditorFilterStyle, fetchCustomFilters } from '../utils/photoConfig.js';
 import { fetchCustomFrames, recordFrameUsage } from '../utils/customFrameConfig.js';
 
 const MenuIcon = () => (
@@ -11,64 +11,28 @@ const MenuIcon = () => (
 const defaultTransform = { x: 0, y: 0, zoom: 1, rotate: 0, flipH: false, flipV: false, filter: 'ORIGINAL' };
 const createEmptySlot = () => ({ photoIdx: null, ...defaultTransform });
 
-const FILTER_CATEGORIES = {
-  ALL: [],
-  ESSENTIAL: ['ORIGINAL', 'BRIGHTEN', 'DARKEN', 'WARM', 'COOL', 'BLUR', 'SHARPEN', 'BEAUTY', 'CONTRAST +', 'CONTRAST -', 'SATURATION +', 'SATURATION -'],
-  RETRO: ['CINEMATIC', 'VINTAGE', 'WARM VINTAGE', 'SEPIA', 'OLD FILM', 'VINTAGE SCR...', 'RETRO PURPLE', 'RETRO TEAL', 'RETRO GOLD', 'RETRO ROSE', 'KODACHROME', 'TECHNICOLOR'],
-  FUN: ['GLITCH', 'PURE NOISE', 'PIXELATE', 'ASCII', 'REFLECTION', 'EMBOSS', 'BLOCKY', '3D STRONG', 'NIGHT VISION', 'X-RAY', 'CARTOON', 'COMIC'],
-  COOL: ['DREAMY', 'CHROMATIC', 'BLOOM', 'TILT SHIFT']
-};
-
-Object.keys(FILTER_CATEGORIES).forEach(k => {
-  if (k !== 'ALL') FILTER_CATEGORIES.ALL.push(...FILTER_CATEGORIES[k]);
-});
-
-const getMockCssFilter = (filterName) => {
-  switch (filterName?.toUpperCase()) {
-    case 'B&W': return 'grayscale(100%)';
-    case 'NEGATIVE': return 'invert(1)';
-    case 'BRIGHTEN': return 'brightness(1.3)';
-    case 'DARKEN': return 'brightness(0.7)';
-    case 'WARM': return 'sepia(0.4) saturate(1.4) hue-rotate(-15deg)';
-    case 'COOL': return 'saturate(1.2) hue-rotate(15deg) contrast(1.1)';
-    case 'BLUR': return 'blur(3px)';
-    case 'SHARPEN': return 'contrast(1.5) saturate(1.2)';
-    case 'BEAUTY': return 'brightness(1.15) contrast(0.9) blur(0.5px)';
-    case 'CONTRAST +': return 'contrast(1.4)';
-    case 'CONTRAST -': return 'contrast(0.6)';
-    case 'SATURATION +': return 'saturate(1.6)';
-    case 'SATURATION -': return 'saturate(0.4)';
-    case 'CINEMATIC': return 'contrast(1.3) saturate(0.8) sepia(0.3)';
-    case 'VINTAGE': return 'sepia(0.6) contrast(1.2) brightness(0.9)';
-    case 'SEPIA': return 'sepia(1)';
-    case 'OLD FILM': return 'sepia(0.8) contrast(1.5) brightness(0.8) grayscale(0.5)';
-    case 'RETRO PURPLE': return 'hue-rotate(45deg) saturate(1.5) contrast(1.2)';
-    case 'RETRO TEAL': return 'hue-rotate(-45deg) saturate(1.5) contrast(1.2)';
-    case 'NIGHT VISION': return 'sepia(1) hue-rotate(90deg) saturate(3) brightness(1.2)';
-    case 'X-RAY': return 'invert(1) grayscale(1) contrast(2)';
-    case 'GRAYSCALE': return 'grayscale(1)';
-    case 'DREAMY': return 'brightness(1.2) contrast(0.8) blur(1px) saturate(1.2)';
-    case 'BLOOM': return 'brightness(1.3) contrast(1.1) blur(0.5px)';
-    default: return 'none';
-  }
-};
+const getMockCssFilter = getEditorFilterStyle;
 
 export default function StudioEditorView({ photos = [], onNext }) {
   const [step, setStep] = useState('choose_frame'); // 'choose_frame' | 'edit_photo' | 'filter_photo' | 'edit_video' | 'video_settings'
-  const [activeFrame, setActiveFrame] = useState(FRAMES[0] || { id: 'default', name: 'Default', tone: '#fff', accent: '#000' });
-  const [availableFrames, setAvailableFrames] = useState(FRAMES);
+  const [activeFrame, setActiveFrame] = useState(null);
+  const [availableFrames, setAvailableFrames] = useState([]);
   const [selectedLayout, setSelectedLayout] = useState(PHOTO_MODES[1] || PHOTO_MODES[0]);
   const [selectedPaperSize, setSelectedPaperSize] = useState(PAPER_SIZES[1] || PAPER_SIZES[0]);
 
   useEffect(() => {
-    async function loadFrames() {
+    async function loadData() {
+      await fetchCustomFilters();
       const custom = await fetchCustomFrames();
-      setAvailableFrames([...FRAMES, ...custom]);
+      setAvailableFrames(custom);
+      if (custom.length > 0) {
+        setActiveFrame(custom[0]);
+      }
     }
-    loadFrames();
+    loadData();
   }, []);
 
-  const [activeCategory, setActiveCategory] = useState('Semua');
+  const [activeCategory, setActiveCategory] = useState('Baru');
   const [filterCategory, setFilterCategory] = useState('ESSENTIAL');
   const [videoFilter, setVideoFilter] = useState('Normal');
 
@@ -87,12 +51,12 @@ export default function StudioEditorView({ photos = [], onNext }) {
     return Array.from({ length: 4 }, () => createEmptySlot());
   });
 
-  const hasFrameSlots = activeFrame.slots && Array.isArray(activeFrame.slots) && activeFrame.slots.length > 0;
+  const hasFrameSlots = activeFrame?.slots && Array.isArray(activeFrame.slots) && activeFrame.slots.length > 0;
 
   // Keep slot count synced with the selected template, but leave every slot
   // empty until the customer intentionally chooses a photo for it.
   useEffect(() => {
-    const nextSlotCount = activeFrame.slots && Array.isArray(activeFrame.slots) && activeFrame.slots.length > 0
+    const nextSlotCount = activeFrame?.slots && Array.isArray(activeFrame.slots) && activeFrame.slots.length > 0
       ? activeFrame.slots.length
       : selectedLayout.count;
     setSlots(Array.from({ length: nextSlotCount }, () => createEmptySlot()));
@@ -128,19 +92,19 @@ export default function StudioEditorView({ photos = [], onNext }) {
   };
 
   const handleFinish = () => {
-    recordFrameUsage(activeFrame.id);
+    if (activeFrame) recordFrameUsage(activeFrame.id);
     const frameConfig = hasFrameSlots ? {
-      frameImage: activeFrame.frameImage || activeFrame.url,
-      width: activeFrame.width || 1080,
-      height: activeFrame.height || 1920,
-      background: activeFrame.background || '#fffdf8',
-      slots: activeFrame.slots,
+      frameImage: activeFrame?.frameImage || activeFrame?.url,
+      width: activeFrame?.width || 1080,
+      height: activeFrame?.height || 1920,
+      background: activeFrame?.background || '#fffdf8',
+      slots: activeFrame?.slots,
     } : null;
 
     onNext({
       variants: [{
         template: hasFrameSlots
-          ? { id: `custom-${activeFrame.slots.length}`, count: activeFrame.slots.length, type: 'custom' }
+          ? { id: `custom-${activeFrame?.slots?.length}`, count: activeFrame?.slots?.length, type: 'custom' }
           : selectedLayout, 
         paperSize: selectedPaperSize,
         frame: activeFrame,
@@ -186,9 +150,9 @@ export default function StudioEditorView({ photos = [], onNext }) {
 
   // Keep the editor aligned to the selected frame. Extra captured poses stay out
   // of the print layout when the frame has fewer photo holes.
-  const slotCount = hasFrameSlots ? activeFrame.slots.length : selectedLayout.count;
-  const availablePhotos = (photos || []).slice(0, 8);
-  const thumbnailSlots = Array.from({ length: 8 });
+  const slotCount = hasFrameSlots ? activeFrame?.slots?.length : selectedLayout.count;
+  const availablePhotos = (photos || []).slice(0, 5);
+  const thumbnailSlots = Array.from({ length: 5 });
 
   const allFrames = availablePhotos.reduce((acc, p) => p.frames ? acc.concat(p.frames) : acc.concat([p.src]), []);
   const currentVideoFrameSrc = allFrames.length > 0 ? allFrames[gifFrame % allFrames.length] : '';
@@ -207,6 +171,10 @@ export default function StudioEditorView({ photos = [], onNext }) {
     cursor: 'pointer',
     fontSize: '0.8rem'
   };
+
+  if (!activeFrame) {
+    return <div className="flex h-screen w-full items-center justify-center bg-zinc-900 text-white font-semibold">Memuat...</div>;
+  }
 
   return (
     <section className="studio-fullscreen-workspace" style={{
@@ -543,88 +511,28 @@ export default function StudioEditorView({ photos = [], onNext }) {
       }}>
         {step === 'choose_frame' ? (
           <>
-            {/* Navigation */}
-            <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', color: '#9ca3af', marginBottom: '1.5rem', fontSize: '0.85rem', overflowX: 'auto', flexShrink: 0 }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', color: 'white', fontWeight: 'bold', cursor: 'pointer' }}>
-                <MenuIcon /> Filter
-              </div>
-              <span style={{ cursor: 'pointer', color: activeCategory === 'Baru' ? 'white' : '#9ca3af' }} onClick={() => setActiveCategory('Baru')}>Baru</span>
-              <span style={{ cursor: 'pointer', color: activeCategory === 'Trending' ? 'white' : '#9ca3af' }} onClick={() => setActiveCategory('Trending')}>Trending</span>
-              <span style={{ cursor: 'pointer', color: activeCategory === 'Sering Dipakai' ? 'white' : '#9ca3af', whiteSpace: 'nowrap' }} onClick={() => setActiveCategory('Sering Dipakai')}>Sering Dipakai</span>
-	            </div>
 
-	            <div style={{ display: 'grid', gap: '1rem', marginBottom: '1.25rem', flexShrink: 0 }}>
-	              <div style={{ border: '1px solid #27272a', background: '#18181b', borderRadius: '12px', padding: '0.8rem', color: '#d1d5db', fontSize: '0.78rem', lineHeight: 1.35 }}>
-	                Pilih jumlah kotak dan template dulu. Foto tidak akan otomatis masuk; setelah klik selanjutnya, pilih kotak lalu pilih foto.
-	              </div>
-	              <div>
-	                <div style={{ fontSize: '0.72rem', color: '#9ca3af', fontWeight: 'bold', marginBottom: '0.6rem' }}>LAYOUT</div>
-	                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '0.5rem' }}>
-	                  {PHOTO_MODES.map((mode) => {
-	                    const isSelected = !hasFrameSlots && selectedLayout.id === mode.id;
-	                    return (
-	                      <button
-	                        key={mode.id}
-	                        type="button"
-	                        onClick={() => setSelectedLayout(mode)}
-	                        disabled={hasFrameSlots}
-	                        style={{
-	                          minHeight: '44px',
-	                          borderRadius: '8px',
-	                          background: isSelected ? 'white' : '#1f2937',
-	                          color: isSelected ? '#111827' : '#e5e7eb',
-	                          border: isSelected ? 'none' : '1px solid #374151',
-	                          fontWeight: 'bold',
-	                          fontSize: '0.78rem',
-	                          cursor: hasFrameSlots ? 'not-allowed' : 'pointer',
-	                          opacity: hasFrameSlots ? 0.45 : 1
-	                        }}
-	                      >
-	                        {mode.count}
-	                      </button>
-	                    );
-	                  })}
-	                </div>
-	                {hasFrameSlots && (
-	                  <div style={{ marginTop: '0.55rem', color: '#fbbf24', fontSize: '0.72rem', fontWeight: 'bold' }}>
-	                    Frame ini memakai {activeFrame.slots.length} slot foto
-	                  </div>
-	                )}
-	              </div>
-
-	              <div>
-	                <div style={{ fontSize: '0.72rem', color: '#9ca3af', fontWeight: 'bold', marginBottom: '0.6rem' }}>UKURAN KERTAS</div>
-	                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: '0.5rem' }}>
-	                  {PAPER_SIZES.map((paper) => {
-	                    const isSelected = selectedPaperSize.id === paper.id;
-	                    return (
-	                      <button
-	                        key={paper.id}
-	                        type="button"
-	                        onClick={() => setSelectedPaperSize(paper)}
-	                        style={{
-	                          minHeight: '44px',
-	                          borderRadius: '8px',
-	                          background: isSelected ? 'white' : '#1f2937',
-	                          color: isSelected ? '#111827' : '#e5e7eb',
-	                          border: isSelected ? 'none' : '1px solid #374151',
-	                          fontWeight: 'bold',
-	                          cursor: 'pointer'
-	                        }}
-	                      >
-	                        {paper.name}
-	                      </button>
-	                    );
-	                  })}
-	                </div>
-	              </div>
-	            </div>
 
 	            {/* Frames Grid */}
 	            <div style={{ flex: 1, overflowY: 'auto', paddingRight: '0.5rem', marginBottom: '1.5rem' }}>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
-                {availableFrames.map((frame, idx) => {
-                  const isSelected = activeFrame.id === frame.id;
+                {(() => {
+                  let result = [...availableFrames];
+                  if (activeCategory === 'Sering Dipakai') {
+                    result.sort((a, b) => (b.usageCount || 0) - (a.usageCount || 0));
+                  } else if (activeCategory === 'Trending') {
+                    // Similar to Sering Dipakai for now, but could be different later
+                    result.sort((a, b) => (b.usageCount || 0) - (a.usageCount || 0));
+                  } else {
+                    // Baru: Sort by ID descending assuming higher ID is newer
+                    result.sort((a, b) => {
+                      const numA = parseInt(a.id.replace('custom_', '')) || 0;
+                      const numB = parseInt(b.id.replace('custom_', '')) || 0;
+                      return numB - numA;
+                    });
+                  }
+                  return result.map((frame, idx) => {
+                    const isSelected = activeFrame?.id === frame.id;
                   return (
                     <div 
                       key={frame.id || idx}
@@ -662,7 +570,8 @@ export default function StudioEditorView({ photos = [], onNext }) {
                       )}
                     </div>
                   );
-                })}
+                });
+              })()}
               </div>
             </div>
 

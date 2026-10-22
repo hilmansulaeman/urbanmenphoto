@@ -6,10 +6,40 @@ export default function PaymentView({ orderDetails, onPaymentSuccess, onBack, ti
   const [isSimulating, setIsSimulating] = useState(false);
   const [paymentError, setPaymentError] = useState('');
   const [customerEmail] = useState(orderDetails.email || orderDetails.backendSession?.email || '');
+  const [voucherCode, setVoucherCode] = useState('');
   const paymentMode = String(import.meta.env.VITE_PAYMENT_MODE || import.meta.env.VITE_MIDTRANS_ENVIRONMENT || 'sandbox').toLowerCase();
   const isDummyPayment = paymentMode === 'dummy';
   const normalizedEmail = customerEmail.trim().toLowerCase();
   const currentTotal = orderDetails.totalPrice || 0;
+
+  const handleSkipPayment = async () => {
+    setIsSimulating(true);
+    let pkgName = orderDetails.tier?.name || 'Package';
+    if (showFeatures) pkgName = 'Basic Package';
+    else if (orderDetails.upsellDetails) pkgName = `Upsell: ${orderDetails.upsellDetails.map(u => u.name).join(', ')}`;
+    
+    try {
+      const session = orderDetails.backendSession || await backendRequest('/api/sessions', null, {
+        method: 'POST',
+        body: JSON.stringify({
+          status: 'created',
+          email: normalizedEmail || null,
+          paperSize: orderDetails.paperSize,
+          layoutId: orderDetails.layoutId,
+          frameId: orderDetails.frameId,
+        }),
+      });
+      
+      onPaymentSuccess({
+        session,
+        payment: { status: 'settled', amount: currentTotal },
+        midtransResult: { transaction_status: 'settlement', payment_type: 'dummy' },
+      });
+    } catch (err) {
+      setPaymentError(err.message || 'Gagal skip pembayaran.');
+      setIsSimulating(false);
+    }
+  };
 
   const loadMidtransSnap = () => new Promise((resolve, reject) => {
     if (window.snap) {
@@ -75,6 +105,7 @@ export default function PaymentView({ orderDetails, onPaymentSuccess, onBack, ti
             provider: 'qris-simulation',
             amount: currentTotal,
             currency: 'IDR',
+            voucherCode: voucherCode.trim() || undefined,
           }),
         });
         logTransaction({
@@ -102,8 +133,27 @@ export default function PaymentView({ orderDetails, onPaymentSuccess, onBack, ti
           provider: 'midtrans',
           amount: currentTotal,
           currency: 'IDR',
+          voucherCode: voucherCode.trim() || undefined,
         }),
       });
+
+      if (payment.status === 'paid' || payment.provider === 'free') {
+        logTransaction({
+          amount: currentTotal,
+          packageName: pkgName,
+          method: 'Free',
+          status: 'Success'
+        });
+        onPaymentSuccess({
+          session,
+          payment,
+          midtransResult: {
+            transaction_status: 'settlement',
+            payment_type: 'free',
+          },
+        });
+        return;
+      }
 
       if (!payment.snapToken) {
         throw new Error('Backend tidak mengembalikan Midtrans Snap token.');
@@ -254,8 +304,26 @@ export default function PaymentView({ orderDetails, onPaymentSuccess, onBack, ti
           <span>Rp {currentTotal.toLocaleString('id-ID')}</span>
         </div>
 
+        <div style={{ marginBottom: '1.5rem', display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+          <label style={{ fontSize: '0.85rem', fontWeight: 600, color: '#475569' }}>Kode Voucher (Opsional)</label>
+          <input
+            type="text"
+            value={voucherCode}
+            onChange={(e) => setVoucherCode(e.target.value.toUpperCase())}
+            placeholder="Masukkan kode..."
+            style={{ width: '100%', padding: '0.8rem', borderRadius: '8px', border: '1px solid #cbd5e1', fontSize: '1rem', textTransform: 'uppercase' }}
+          />
+          {voucherCode && <p style={{ fontSize: '0.75rem', color: '#64748b' }}>Diskon akan diterapkan saat lanjut bayar.</p>}
+        </div>
+
         <button className="primary-action payment-action-button" onClick={handleMidtransPayment}>
           {isDummyPayment ? 'Simulasikan Bayar Berhasil' : 'Bayar Sekarang'}
+        </button>
+        <button 
+          onClick={handleSkipPayment} 
+          style={{ width: '100%', padding: '0.8rem', marginTop: '1rem', background: '#e2e8f0', color: '#475569', border: 'none', borderRadius: '10px', fontWeight: 800, cursor: 'pointer' }}
+        >
+          Lewati Pembayaran (Testing)
         </button>
         {paymentError && (
           <p className="payment-error">{paymentError}</p>

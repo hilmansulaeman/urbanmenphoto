@@ -14,7 +14,7 @@ export async function getCameraStream(cameraOptions = 'user') {
 
   if (options.deviceId) {
     videoConstraints.deviceId = { exact: options.deviceId };
-  } else {
+  } else if (!options.any) {
     videoConstraints.facingMode = { ideal: options.facingMode || 'user' };
   }
 

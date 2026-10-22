@@ -556,10 +556,18 @@ export default function CameraView({ filter, poseLimit = 5, onFinishSession }) {
                     <video ref={(element) => { pickerVideoRefs.current[profile.id] = element; }} className={profile.mirror ? 'is-mirrored' : ''} autoPlay muted playsInline style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover' }} />
                   )}
                   <span style={{ position: 'absolute', top: '1.1rem', left: '1.1rem', zIndex: 1, minWidth: '240px', padding: '0.5rem 1rem', borderRadius: '999px', background: '#ff7414', color: 'white', fontSize: '0.9rem', fontWeight: 900, letterSpacing: '.08em', textTransform: 'uppercase' }}>{profile.name}</span>
-                  <span style={{ position: 'absolute', inset: 0, display: 'grid', placeItems: 'center', opacity: cameraPreviewReady[profile.id] ? 0 : 1, transition: 'opacity .2s' }}>
+                  <span style={{ position: 'absolute', inset: 0, display: 'grid', placeItems: 'center', opacity: profile.captureMode === 'dslr' ? 1 : (cameraPreviewReady[profile.id] ? 0 : 1), transition: 'opacity .2s' }}>
                     <span style={{ display: 'grid', justifyItems: 'center', gap: '0.8rem', maxWidth: '78%', textAlign: 'center' }}>
                       <span style={{ display: 'grid', width: '110px', height: '110px', placeItems: 'center', borderRadius: '50%', background: '#8b8b8b', color: '#101010' }}><CameraIcon /></span>
-                      <span style={{ color: 'white', fontSize: '0.92rem', fontWeight: 700 }}>{cameraPreviewErrors[profile.id] || 'Menyalakan kamera...'}</span>
+                      <span style={{ color: 'white', fontSize: '0.92rem', fontWeight: 700 }}>
+                        {cameraPreviewErrors[profile.id]
+                          || (profile.captureMode === 'dslr'
+                            ? (cameraPreviewReady[profile.id] ? 'DSLR terhubung — klik untuk memilih' : 'Mengecek koneksi DSLR...')
+                            : 'Menyalakan kamera...')}
+                      </span>
+                      {profile.captureMode === 'dslr' && cameraPreviewReady[profile.id] && (
+                        <span style={{ color: '#d1d5db', fontSize: '0.78rem', lineHeight: 1.4 }}>Live preview tidak tersedia untuk DSLR tethering.</span>
+                      )}
                     </span>
                   </span>
                   <span style={{ position: 'absolute', right: 0, bottom: 0, left: 0, padding: '1.15rem', background: '#ff7414', color: 'white', fontSize: '0.95rem', fontWeight: 900, letterSpacing: '.08em', textTransform: 'uppercase' }}>{profile.name}</span>

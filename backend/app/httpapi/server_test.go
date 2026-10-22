@@ -173,6 +173,15 @@ func TestCORSWhitelist(t *testing.T) {
 	if rec.Header().Get("access-control-allow-origin") != "http://localhost:5173" {
 		t.Fatal("expected allowed origin header")
 	}
+
+	req = httptest.NewRequest(http.MethodGet, "/health", nil)
+	req.Header.Set("origin", "http://tauri.localhost")
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Header().Get("access-control-allow-origin") != "http://tauri.localhost" {
+		t.Fatal("expected packaged Tauri kiosk origin to be allowed")
+	}
 }
 
 func TestSwaggerSpec(t *testing.T) {

@@ -17,6 +17,19 @@ export const FILTERS = [
   { id: 'contrast', name: 'Contrast', css: 'contrast(1.28) saturate(1.08)' },
 ];
 
+export const FILTER_CATEGORIES = {
+  ALL: [],
+  ESSENTIAL: ['ORIGINAL', 'BRIGHTEN', 'DARKEN', 'WARM', 'COOL', 'BLUR', 'SHARPEN', 'BEAUTY', 'CONTRAST +', 'CONTRAST -', 'SATURATION +', 'SATURATION -'],
+  RETRO: ['CINEMATIC', 'VINTAGE', 'WARM VINTAGE', 'SEPIA', 'OLD FILM', 'VINTAGE SCR...', 'RETRO PURPLE', 'RETRO TEAL', 'RETRO GOLD', 'RETRO ROSE', 'KODACHROME', 'TECHNICOLOR'],
+  FUN: ['GLITCH', 'PURE NOISE', 'PIXELATE', 'ASCII', 'REFLECTION', 'EMBOSS', 'BLOCKY', '3D STRONG', 'NIGHT VISION', 'X-RAY', 'CARTOON', 'COMIC'],
+  COOL: ['DREAMY', 'CHROMATIC', 'BLOOM', 'TILT SHIFT'],
+  CUSTOM: []
+};
+
+Object.keys(FILTER_CATEGORIES).forEach(k => {
+  if (k !== 'ALL') FILTER_CATEGORIES.ALL.push(...FILTER_CATEGORIES[k]);
+});
+
 export const FRAMES = [
   { id: 'clean', name: 'Clean White', tone: '#ffffff', accent: '#111827', type: 'basic' },
   { id: 'birthday', name: 'Birthday', tone: '#ffec99', accent: '#ff4d8d', type: 'premium' },
@@ -53,8 +66,52 @@ export function getFilterStyle(filterId) {
   return FILTERS.find((filter) => filter.id === filterId)?.css ?? 'none';
 }
 
+const CUSTOM_FILTERS_CACHE = {};
+
+export async function fetchCustomFilters() {
+  try {
+    const res = await fetch('/api/filters');
+    if (!res.ok) throw new Error('Failed to fetch filters');
+    const json = await res.json();
+    
+    // Reset custom categories
+    Object.keys(FILTER_CATEGORIES).forEach(k => {
+      if (k !== 'ALL' && k !== 'ESSENTIAL' && k !== 'RETRO' && k !== 'FUN' && k !== 'COOL' && k !== 'CUSTOM') {
+        delete FILTER_CATEGORIES[k];
+      }
+    });
+    FILTER_CATEGORIES.CUSTOM = [];
+    
+    if (json.data && Array.isArray(json.data)) {
+      json.data.forEach(filter => {
+        const cat = filter.category || 'CUSTOM';
+        if (!FILTER_CATEGORIES[cat]) {
+          FILTER_CATEGORIES[cat] = [];
+        }
+        if (!FILTER_CATEGORIES[cat].includes(filter.name)) {
+          FILTER_CATEGORIES[cat].push(filter.name);
+        }
+        CUSTOM_FILTERS_CACHE[filter.name.toUpperCase()] = filter.css;
+      });
+    }
+
+    // Rebuild ALL category
+    FILTER_CATEGORIES.ALL = [];
+    Object.keys(FILTER_CATEGORIES).forEach(k => {
+      if (k !== 'ALL') FILTER_CATEGORIES.ALL.push(...FILTER_CATEGORIES[k]);
+    });
+  } catch (err) {
+    console.error('Error fetching custom filters:', err);
+  }
+}
+
 export function getEditorFilterStyle(filterName) {
-  switch (filterName?.toUpperCase()) {
+  const upperName = filterName?.toUpperCase();
+  if (CUSTOM_FILTERS_CACHE[upperName]) {
+    return CUSTOM_FILTERS_CACHE[upperName];
+  }
+
+  switch (upperName) {
     case 'B&W': return 'grayscale(100%)';
     case 'NEGATIVE': return 'invert(1)';
     case 'BRIGHTEN': return 'brightness(1.3)';

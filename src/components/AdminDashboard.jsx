@@ -1,14 +1,23 @@
 import { useState, useEffect, useRef } from 'react';
+import PaymentView from './PaymentView';
+import WalletTab from './WalletTab';
+import FrameManager from './FrameManager';
+import FrameGifManager from './FrameGifManager';
+import SubscriptionTab from './SubscriptionTab';
+import PaymentKeyTab from './PaymentKeyTab';
 import { supabase } from '../utils/supabaseClient';
-import { getKioskSettings, getPublicGalleryBaseUrl, saveKioskSettings } from '../utils/kioskConfig.js';
+import { getKioskSettings, getPublicGalleryBaseUrl, saveKioskSettings, normalizeCameraProfiles, defaultSettings as defaultKioskSettings, setActiveProjectId } from '../utils/kioskConfig.js';
 import { clearTransactions } from '../utils/transactionLogger.js';
 import { getFrameSettings, saveFrameSettings } from '../utils/frameConfig.js';
 import { fetchCustomFrames, setCustomFrameDisabled, validateFrameConfig } from '../utils/customFrameConfig.js';
 import { FRAMES } from '../utils/photoConfig.js';
 import { BACKEND_API_URL, backendRequest, formatCurrency, formatDateTime, getBackendApiUrl, reportMonitoringError } from '../utils/backendApi.js';
-import { getCameraStream, getCameraStreamForProfile, listVideoDevices, stopStream } from '../utils/camera.js';
-import { captureDslrPhoto, listDslrCameras } from '../utils/dslr.js';
+import { stopStream, listVideoDevices } from '../utils/camera.js';
+import { captureDslrPhoto, listDslrCameras, listHardwarePrinters } from '../utils/dslr.js';
 import { clearRecoveryHistory, getRecoveryHistory, getRecoverySession, removeRecoverySession, saveRecoverySession } from '../utils/sessionRecovery.js';
+import AdminOverview from './AdminOverview.jsx';
+import ProfileTab from './ProfileTab';
+import ProjectManager from './ProjectManager.jsx';
 
 const ADMIN_TOKEN_KEY = 'urbanmenphoto_admin_token';
 const ADMIN_USER_KEY = 'urbanmenphoto_admin_user';
@@ -82,12 +91,25 @@ const PaymentKeyIcon = () => (
     <line x1="3" y1="10" x2="21" y2="10" />
   </svg>
 );
+const ProfileIcon = () => (
+  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <circle cx="12" cy="8" r="4" />
+    <path d="M4 21c.8-4 3.5-6 8-6s7.2 2 8 6" />
+  </svg>
+);
+const SubscriptionIcon = () => (
+  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <rect x="3" y="4" width="18" height="17" rx="2" />
+    <path d="M8 2v4M16 2v4M7 11h10M7 16h5" />
+  </svg>
+);
 
 const MENU_ITEMS = [
   { id: 'overview', label: 'Overview', icon: <OverviewIcon /> },
+  { id: 'projects', label: 'Proyek', icon: <OverviewIcon /> },
   { id: 'kiosk', label: 'Kiosk', icon: <KioskIcon /> },
   { id: 'booth_health', label: 'Booth Health', icon: <StatisticIcon /> },
-  { id: 'monitoring', label: 'Monitoring', icon: <StatisticIcon /> },
+  { id: 'filters', label: 'Filters', icon: <StatisticIcon /> },
   { id: 'recovery', label: 'Recovery', icon: <TransactionIcon /> },
   { id: 'storage', label: 'Storage', icon: <GalleryIcon /> },
   { id: 'gallery', label: 'Gallery', icon: <GalleryIcon /> },
@@ -99,12 +121,23 @@ const MENU_ITEMS = [
   { id: 'frame_photo', label: 'Frame Photo', icon: <FramePhotoIcon /> },
   { id: 'frame_gif', label: 'Frame Gif', icon: <FrameGifIcon /> },
   { id: 'voucher', label: 'Voucher', icon: <VoucherIcon /> },
+  { id: 'profile', label: 'Profile', icon: <ProfileIcon /> },
+  { id: 'subscription', label: 'Subscription', icon: <SubscriptionIcon /> },
+  { id: 'wallet', label: 'Dompet', icon: <PaymentKeyIcon /> },
   { id: 'admin_users', label: 'Admin Users', icon: <KioskIcon /> },
   { id: 'audit_logs', label: 'Audit Logs', icon: <StatisticIcon /> },
   { id: 'payment_key', label: 'Payment Key', icon: <PaymentKeyIcon /> },
 ];
 
-const STAFF_ALLOWED_MENUS = new Set(['booth_health', 'monitoring', 'recovery', 'gallery', 'reports', 'statistic', 'transaction', 'payments', 'messages', 'frame_photo']);
+const STAFF_ALLOWED_MENUS = new Set(['profile', 'booth_health', 'filters', 'recovery', 'gallery', 'reports', 'statistic', 'transaction', 'payments', 'messages', 'frame_photo']);
+
+const getAdminTabFromPath = () => {
+  const section = window.location.pathname.replace(/^\/admin\/?/, '').split('/')[0];
+  if (section === 'kiosk-settings') return 'kiosk';
+  return MENU_ITEMS.some(item => item.id === section) ? section : 'overview';
+};
+
+const getAdminPath = (tab) => (tab === 'overview' ? '/admin' : `/admin/${tab}`);
 
 const spreadsheetEscape = (value) => {
   if (value == null) return '';
@@ -290,7 +323,7 @@ function StatusBadge({ status, before }) {
       whiteSpace: 'nowrap',
       ...style,
     }}>
-      {before ? `${before} → ` : ''}{normalized}
+      {normalized === 'paid' ? 'Success Paid' : `${before ? `${before} → ` : ''}${normalized}`}
     </span>
   );
 }
@@ -396,16 +429,23 @@ function AdminPagination({ page, totalPages, pageSize, total, onPageChange, onPa
   );
 }
 
-function KioskSettingsTab() {
-  const [settings, setSettings] = useState(getKioskSettings());
+function KioskSettingsTab({ projectId, adminToken, onBack }) {
+  const [settings, setSettings] = useState(null);
   const [savedMessage, setSavedMessage] = useState('');
-  const [cameraDevices, setCameraDevices] = useState([]);
   const [dslrCameras, setDslrCameras] = useState([]);
+  const [webcams, setWebcams] = useState([]);
   const [cameraMessage, setCameraMessage] = useState('');
-  const [isLoadingCameras, setIsLoadingCameras] = useState(false);
+  const [refreshingCameraId, setRefreshingCameraId] = useState('');
+  const [lastRefreshedCameraId, setLastRefreshedCameraId] = useState('');
+  const [hardwarePrinters, setHardwarePrinters] = useState([]);
+  const [printerMessage, setPrinterMessage] = useState('');
+  const [isLoadingPrinters, setIsLoadingPrinters] = useState(false);
   const [isTestingCamera, setIsTestingCamera] = useState(false);
   const [previewCameraId, setPreviewCameraId] = useState('');
   const [isTestPrintActive, setIsTestPrintActive] = useState(false);
+  const [projectName, setProjectName] = useState('');
+  const [projectCover, setProjectCover] = useState('');
+  const [isUploadingCover, setIsUploadingCover] = useState(false);
   const previewVideoRef = useRef(null);
   const previewStreamRef = useRef(null);
   const [previewImage, setPreviewImage] = useState('');
@@ -418,35 +458,57 @@ function KioskSettingsTab() {
     return () => window.removeEventListener('afterprint', handleAfterPrint);
   }, []);
 
+  useEffect(() => {
+    const fetchSettings = async () => {
+      try {
+        const url = projectId ? `/api/admin/projects/${projectId}` : `/api/settings`;
+        const res = await backendRequest(url, adminToken);
+        const fetchedSettings = projectId ? (res.settings || {}) : (res || {});
+        
+        // Merge with defaults and ensure exactly 2 camera profiles exist
+        const mergedSettings = { ...defaultKioskSettings, ...fetchedSettings };
+        mergedSettings.cameraProfiles = normalizeCameraProfiles(mergedSettings);
+        
+        setSettings(mergedSettings);
+        if (projectId) {
+          setProjectName(res.name || '');
+          setProjectCover(res.coverImage || res.cover || '');
+        }
+      } catch (err) {
+        console.error("Failed to fetch settings", err);
+      }
+    };
+    fetchSettings();
+  }, [projectId, adminToken]);
+
   const handleChange = (e) => {
     const { name, value, type, checked } = e.target;
     setSettings(prev => ({ ...prev, [name]: type === 'checkbox' ? checked : value }));
   };
 
-  const loadCameraDevices = async ({ requestPermission = false } = {}) => {
-    setIsLoadingCameras(true);
+  const loadCameraDevices = async (profile, cameraNumber) => {
+    if (profile) {
+      setRefreshingCameraId(profile.id);
+      setLastRefreshedCameraId(profile.id);
+    }
     setCameraMessage('');
     try {
-      let permissionStream = null;
-      let webcamCount = 0;
-      try {
-        if (requestPermission) permissionStream = await getCameraStream('user');
-        const devices = await listVideoDevices();
-        setCameraDevices(devices);
-        webcamCount = devices.length;
-        stopStream(permissionStream);
-      } catch (webcamError) {
-        stopStream(permissionStream);
-        setCameraDevices([]);
-      }
       const dslrs = await listDslrCameras();
       setDslrCameras(dslrs);
-      setCameraMessage(`${webcamCount} webcam dan ${dslrs.length} DSLR tethering terdeteksi.`);
+      try {
+        const cams = await listVideoDevices();
+        setWebcams(cams);
+      } catch (e) {
+        console.warn('Webcams not found or permission denied', e);
+      }
+      setCameraMessage(profile
+        ? `Kamera ${cameraNumber} diperbarui: ${dslrs.length} Canon DSLR terdeteksi dari Hardware Agent.`
+        : `${dslrs.length} Canon DSLR terdeteksi dari Hardware Agent.`);
     } catch (err) {
       setDslrCameras([]);
-      setCameraMessage(err.message || 'Gagal membaca perangkat DSLR. Pastikan gphoto2 sudah terpasang.');
+      setCameraMessage(err.message || 'Hardware Agent tidak dapat membaca Canon DSLR.');
     } finally {
-      setIsLoadingCameras(false);
+      if (profile) setRefreshingCameraId('');
     }
   };
 
@@ -454,11 +516,23 @@ function KioskSettingsTab() {
     loadCameraDevices();
   }, []);
 
-  const handleCameraDeviceChange = (e) => {
-    const deviceId = e.target.value;
-    const selectedDevice = cameraDevices.find(device => device.deviceId === deviceId);
-    updateCameraProfile('camera-1', { deviceId, deviceLabel: selectedDevice?.label || '' });
+  const loadHardwarePrinters = async () => {
+    setIsLoadingPrinters(true);
+    try {
+      const printers = await listHardwarePrinters();
+      setHardwarePrinters(printers);
+      setPrinterMessage(`${printers.length} printer Windows terdeteksi dari Hardware Agent.`);
+    } catch (error) {
+      setHardwarePrinters([]);
+      setPrinterMessage(error.message || 'Hardware Agent tidak dapat membaca printer.');
+    } finally {
+      setIsLoadingPrinters(false);
+    }
   };
+
+  useEffect(() => {
+    loadHardwarePrinters();
+  }, []);
 
   const updateCameraProfile = (profileId, changes) => {
     setSettings(prev => ({
@@ -469,16 +543,13 @@ function KioskSettingsTab() {
 
   const getCameraProfileStatus = (profile) => {
     if (!profile.enabled) return { text: 'Nonaktif', color: '#6b7280', background: '#f3f4f6' };
-    if (profile.captureMode === 'dslr') {
-      if (!profile.tetherPort) return { text: 'Pilih port DSLR', color: '#92400e', background: '#fef3c7' };
-      return dslrCameras.some(camera => camera.port === profile.tetherPort)
-        ? { text: 'DSLR terdeteksi dan siap memotret', color: '#166534', background: '#dcfce7' }
-        : { text: 'DSLR tidak terdeteksi', color: '#991b1b', background: '#fee2e2' };
+    if ((profile.captureMode || 'dslr') === 'webcam') {
+      return profile.deviceId ? { text: 'Webcam siap digunakan', color: '#166534', background: '#dcfce7' } : { text: 'Pilih Webcam Device', color: '#92400e', background: '#fef3c7' };
     }
-    if (!profile.deviceId) return { text: 'Belum memilih perangkat', color: '#92400e', background: '#fef3c7' };
-    if (cameraDevices.some(device => device.deviceId === profile.deviceId)) return { text: 'Terdeteksi dan siap diuji', color: '#166534', background: '#dcfce7' };
-    if (profile.deviceLabel && cameraDevices.some(device => device.label === profile.deviceLabel)) return { text: 'Perangkat ada, ID berubah — test untuk sinkronkan', color: '#92400e', background: '#fef3c7' };
-    return { text: 'Perangkat tidak terdeteksi', color: '#991b1b', background: '#fee2e2' };
+    if (!profile.tetherPort) return { text: 'Pilih Canon DSLR', color: '#92400e', background: '#fef3c7' };
+    return dslrCameras.some(camera => camera.port === profile.tetherPort)
+      ? { text: 'Canon DSLR terdeteksi dan siap memotret', color: '#166534', background: '#dcfce7' }
+      : { text: 'Canon DSLR tidak terdeteksi', color: '#991b1b', background: '#fee2e2' };
   };
 
   const handleTestCamera = async (cameraId) => {
@@ -489,28 +560,27 @@ function KioskSettingsTab() {
     try {
       const cameraProfile = settings.cameraProfiles?.find(profile => profile.id === cameraId) || settings.cameraProfiles?.[0];
       setPreviewCameraId(cameraProfile?.id || '');
-      if (cameraProfile?.captureMode === 'dslr') {
-        if (!cameraProfile.tetherPort) throw new Error('Pilih port DSLR terlebih dahulu.');
-        const result = await captureDslrPhoto(cameraProfile.tetherPort);
-        setPreviewImage(result.url);
-        setCameraMessage(`Foto test ${cameraProfile.name || 'DSLR'} berhasil diambil.`);
+      
+      if ((cameraProfile?.captureMode || 'dslr') === 'webcam') {
+        if (!cameraProfile?.deviceId && !cameraProfile?.facingMode) throw new Error('Pilih Webcam Device terlebih dahulu.');
+        
+        const constraints = {
+          video: cameraProfile?.deviceId ? { deviceId: { exact: cameraProfile.deviceId } } : { facingMode: cameraProfile?.facingMode || 'user' }
+        };
+        const stream = await navigator.mediaDevices.getUserMedia(constraints);
+        previewStreamRef.current = stream;
+        if (previewVideoRef.current) {
+          previewVideoRef.current.srcObject = stream;
+          previewVideoRef.current.play().catch(e => console.warn('Play interrupted', e));
+        }
+        setCameraMessage(`Preview Webcam aktif.`);
         return;
       }
-      const resolved = await getCameraStreamForProfile(cameraProfile, settings.defaultCamera || 'user');
-      const { stream } = resolved;
-      previewStreamRef.current = stream;
-      if (previewVideoRef.current) {
-        previewVideoRef.current.srcObject = stream;
-        await previewVideoRef.current.play();
-      }
-      const devices = await listVideoDevices();
-      setCameraDevices(devices);
-      const activeTrack = stream.getVideoTracks?.()[0];
-      updateCameraProfile(cameraProfile?.id || 'camera-1', {
-        deviceId: resolved.deviceId || cameraProfile?.deviceId || '',
-        deviceLabel: activeTrack?.label || resolved.deviceLabel || cameraProfile?.deviceLabel || '',
-      });
-      setCameraMessage(`Preview ${cameraProfile?.name || 'kamera'} aktif.`);
+      
+      if (!cameraProfile?.tetherPort) throw new Error('Pilih Canon DSLR terlebih dahulu.');
+      const result = await captureDslrPhoto(cameraProfile.tetherPort);
+      setPreviewImage(result.url);
+      setCameraMessage(`Foto test ${cameraProfile.name || 'DSLR'} berhasil diambil.`);
     } catch (err) {
       setCameraMessage(err.message || 'Kamera tidak bisa ditest.');
     } finally {
@@ -577,11 +647,54 @@ function KioskSettingsTab() {
     }
   };
 
-  const handleSave = (e) => {
+  const handleUploadCover = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    setIsUploadingCover(true);
+    try {
+      const formData = new FormData();
+      formData.append('file', file, file.name);
+
+      const res = await fetch(`${getBackendApiUrl()}/api/admin/frames/upload`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${adminToken}` },
+        body: formData
+      });
+      if (!res.ok) throw new Error('Gagal upload cover');
+      const resData = await res.json();
+      const assetUrl = resData.data?.url || resData.url || resData.imageUrl;
+      if (assetUrl) {
+        setProjectCover(assetUrl);
+      } else {
+        throw new Error('URL gambar tidak ditemukan dari response server');
+      }
+    } catch (err) {
+      alert(err.message);
+    } finally {
+      setIsUploadingCover(false);
+    }
+  };
+
+  const handleSave = async (e) => {
     e.preventDefault();
-    if (saveKioskSettings(settings)) {
+    try {
+      if (projectId) {
+        await backendRequest(`/api/admin/projects/${projectId}`, adminToken, {
+          method: 'PATCH',
+          body: JSON.stringify({ settings, name: projectName, coverImage: projectCover })
+        });
+      } else {
+        await fetch(`${BACKEND_API_URL}/api/settings`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(settings)
+        });
+      }
       setSavedMessage('Pengaturan berhasil disimpan!');
       setTimeout(() => setSavedMessage(''), 3000);
+    } catch (err) {
+      alert("Gagal menyimpan: " + err.message);
     }
   };
 
@@ -595,19 +708,28 @@ function KioskSettingsTab() {
     }
   };
 
+  if (!settings) return <div style={{ padding: '2rem' }}>Memuat pengaturan...</div>;
+
   return (
     <div style={{ background: 'white', padding: '2.5rem', borderRadius: '12px', border: '1px solid #e9ecef', boxShadow: '0 2px 8px rgba(0,0,0,0.02)' }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '2rem', borderBottom: '1px solid #e9ecef', paddingBottom: '1rem' }}>
         <div>
-          <h2 style={{ margin: 0, color: '#111' }}>Kiosk Machine Settings</h2>
+          <h2 style={{ margin: 0, color: '#111' }}>{projectId ? `Project Settings (${projectId})` : 'Global Kiosk Settings'}</h2>
           <p style={{ margin: 0, color: '#6c757d', marginTop: '0.2rem', fontSize: '0.9rem' }}>Konfigurasi mesin fisik photobooth ini.</p>
         </div>
-        <button onClick={toggleFullscreen} style={{ padding: '0.6rem 1.2rem', background: '#f97316', color: 'white', border: 'none', borderRadius: '8px', cursor: 'pointer', fontWeight: 'bold', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-          <OverviewIcon /> Masuk Fullscreen
-        </button>
+        <div style={{ display: 'flex', gap: '0.5rem' }}>
+          {onBack && (
+            <button type="button" onClick={onBack} style={{ padding: '0.6rem 1.2rem', background: '#f3f4f6', color: '#374151', border: '1px solid #d1d5db', borderRadius: '8px', cursor: 'pointer', fontWeight: 'bold' }}>
+              Kembali
+            </button>
+          )}
+          <button onClick={() => { window.location.href = '/'; }} style={{ padding: '0.6rem 1.2rem', background: '#2563eb', color: 'white', border: 'none', borderRadius: '8px', cursor: 'pointer', fontWeight: 'bold' }}>
+            Buka Photobooth
+          </button>
+        </div>
       </div>
 
-      <form onSubmit={handleSave} style={{ maxWidth: '920px' }}>
+      <form onSubmit={handleSave} style={{ width: '100%' }}>
         {isTestPrintActive && (
           <div className="print-area">
             <div style={{
@@ -643,6 +765,47 @@ function KioskSettingsTab() {
             <h3 style={{ margin: 0, color: '#111827' }}>Booth Profile</h3>
             <p style={{ margin: '0.25rem 0 0', color: '#6b7280', fontSize: '0.85rem' }}>Identitas booth untuk log, gallery, dan operasional event.</p>
           </div>
+
+          {projectId && (
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem', marginBottom: '1rem' }}>
+              <div>
+                <label style={{ display: 'block', marginBottom: '0.45rem', fontWeight: 'bold', color: '#495057', fontSize: '0.9rem' }}>Nama Proyek / Event</label>
+                <input
+                  type="text"
+                  value={projectName}
+                  onChange={(e) => setProjectName(e.target.value)}
+                  style={{ width: '100%', padding: '0.8rem', borderRadius: '8px', border: '1px solid #ced4da', fontSize: '0.95rem' }}
+                />
+              </div>
+              <div>
+                <label style={{ display: 'block', marginBottom: '0.45rem', fontWeight: 'bold', color: '#495057', fontSize: '0.9rem' }}>Cover Image</label>
+                <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+                  {projectCover && (
+                    <img src={projectCover.startsWith('/') ? `${getBackendApiUrl()}${projectCover}` : projectCover} alt="Cover Preview" style={{ width: '48px', height: '48px', objectFit: 'cover', borderRadius: '6px', border: '1px solid #ced4da' }} />
+                  )}
+                  <div style={{ flex: 1, position: 'relative' }}>
+                    <input
+                      type="file"
+                      accept="image/*"
+                      onChange={handleUploadCover}
+                      disabled={isUploadingCover}
+                      style={{
+                        position: 'absolute',
+                        width: '100%',
+                        height: '100%',
+                        opacity: 0,
+                        cursor: isUploadingCover ? 'wait' : 'pointer',
+                        zIndex: 10,
+                      }}
+                    />
+                    <div style={{ width: '100%', padding: '0.8rem', borderRadius: '8px', border: '1px dashed #ced4da', fontSize: '0.95rem', background: '#f8fafc', color: '#64748b', textAlign: 'center' }}>
+                      {isUploadingCover ? 'Mengunggah...' : (projectCover ? 'Ganti Cover Image' : 'Pilih/Upload Image')}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
 
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
             <div>
@@ -768,6 +931,7 @@ function KioskSettingsTab() {
                 </button>
               </div>
             </div>
+
           </div>
 
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem', marginTop: '1rem' }}>
@@ -800,14 +964,6 @@ function KioskSettingsTab() {
               <label style={{ display: 'block', marginBottom: '0.35rem', fontWeight: 'bold', color: '#495057' }}>Camera Device Booth</label>
               <p style={{ fontSize: '0.82rem', color: '#868e96', margin: 0 }}>Dipilih admin/operator dan otomatis dipakai customer saat sesi foto.</p>
             </div>
-            <button
-              type="button"
-              onClick={() => loadCameraDevices({ requestPermission: true })}
-              disabled={isLoadingCameras}
-              style={{ padding: '0.65rem 1rem', background: '#111827', color: 'white', border: 'none', borderRadius: '8px', cursor: isLoadingCameras ? 'wait' : 'pointer', fontWeight: 'bold', whiteSpace: 'nowrap' }}
-            >
-              {isLoadingCameras ? 'Membaca...' : 'Refresh Kamera'}
-            </button>
           </div>
 
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem', marginBottom: '1rem' }}>
@@ -820,22 +976,41 @@ function KioskSettingsTab() {
                   placeholder={`Posisi Kamera ${index + 1}`}
                   style={{ width: '100%', boxSizing: 'border-box', marginBottom: '0.6rem', padding: '0.7rem', borderRadius: '8px', border: '1px solid #ced4da' }}
                 />
-                <select value={profile.captureMode || 'webcam'} onChange={(event) => updateCameraProfile(profile.id, { captureMode: event.target.value })}
-                  style={{ width: '100%', padding: '0.7rem', borderRadius: '8px', border: '1px solid #ced4da', background: 'white' }}
-                >
-                  <option value="webcam">Webcam / Capture Card</option>
-                  <option value="dslr">DSLR Tethering (USB)</option>
+                <div style={{ marginBottom: '0.4rem', color: '#495057', fontWeight: 700, fontSize: '0.82rem' }}>Mode Kamera</div>
+                <select value={profile.captureMode || 'dslr'} onChange={(event) => updateCameraProfile(profile.id, { captureMode: event.target.value })} style={{ width: '100%', marginBottom: '0.6rem', padding: '0.7rem', borderRadius: '8px', border: '1px solid #ced4da', background: 'white' }}>
+                    <option value="dslr">DSLR (USB / gphoto2)</option>
+                    <option value="webcam">Webcam (Browser / HP)</option>
                 </select>
-                {profile.captureMode === 'dslr' ? (
-                  <select value={profile.tetherPort || ''} onChange={(event) => updateCameraProfile(profile.id, { tetherPort: event.target.value })} style={{ width: '100%', marginTop: '0.6rem', padding: '0.7rem', borderRadius: '8px', border: '1px solid #ced4da', background: 'white' }}>
-                    <option value="">Pilih DSLR tethering</option>
-                    {dslrCameras.map(camera => <option key={camera.port} value={camera.port}>{camera.model} — {camera.port}</option>)}
-                  </select>
+
+                {(profile.captureMode || 'dslr') === 'dslr' ? (
+                  <>
+                    <div style={{ marginBottom: '0.4rem', color: '#495057', fontWeight: 700, fontSize: '0.82rem' }}>Canon DSLR melalui Camera Bridge (Zadig / WinUSB)</div>
+                    <select value={profile.tetherPort || ''} onChange={(event) => updateCameraProfile(profile.id, { tetherPort: event.target.value })} style={{ width: '100%', marginTop: '0.6rem', padding: '0.7rem', borderRadius: '8px', border: '1px solid #ced4da', background: 'white' }}>
+                        <option value="">Pilih DSLR dari Camera Agent</option>
+                        {dslrCameras.map(camera => <option key={camera.port} value={camera.port}>{camera.model} — {camera.stable === false ? `${camera.port} (ID sementara)` : camera.port}</option>)}
+                    </select>
+                  </>
                 ) : (
-                  <select value={profile.deviceId || ''} onChange={(event) => { const device = cameraDevices.find(item => item.deviceId === event.target.value); updateCameraProfile(profile.id, { deviceId: event.target.value, deviceLabel: device?.label || '' }); }} style={{ width: '100%', marginTop: '0.6rem', padding: '0.7rem', borderRadius: '8px', border: '1px solid #ced4da', background: 'white' }}>
-                    <option value="">{index === 0 ? 'Auto / Browser Default' : 'Pilih perangkat Kamera 2'}</option>
-                    {cameraDevices.map((device, deviceIndex) => <option key={device.deviceId || deviceIndex} value={device.deviceId}>{device.label || `Camera ${deviceIndex + 1}`}</option>)}
-                  </select>
+                  <>
+                    <div style={{ marginBottom: '0.4rem', color: '#495057', fontWeight: 700, fontSize: '0.82rem' }}>Pilih Webcam Device (Aktifkan Izin Kamera di Browser)</div>
+                    <select value={profile.deviceId || ''} onChange={(event) => updateCameraProfile(profile.id, { deviceId: event.target.value, deviceLabel: event.target.options[event.target.selectedIndex].text })} style={{ width: '100%', marginTop: '0.6rem', padding: '0.7rem', borderRadius: '8px', border: '1px solid #ced4da', background: 'white' }}>
+                        <option value="">Default Kamera ({profile.facingMode === 'environment' ? 'Belakang' : 'Depan'})</option>
+                        {webcams.map(cam => <option key={cam.deviceId} value={cam.deviceId}>{cam.label}</option>)}
+                    </select>
+                  </>
+                )}
+                <button
+                  type="button"
+                  onClick={() => loadCameraDevices(profile, index + 1)}
+                  disabled={Boolean(refreshingCameraId)}
+                  style={{ width: '100%', marginTop: '0.6rem', padding: '0.65rem 0.8rem', background: '#111827', color: 'white', border: 'none', borderRadius: '8px', cursor: refreshingCameraId ? 'wait' : 'pointer', fontWeight: 'bold' }}
+                >
+                  {refreshingCameraId === profile.id ? `Mengecek Kamera ${index + 1}...` : `Refresh Kamera ${index + 1}`}
+                </button>
+                {lastRefreshedCameraId === profile.id && cameraMessage && (
+                  <div style={{ marginTop: '0.55rem', padding: '0.55rem 0.65rem', borderRadius: '7px', background: dslrCameras.length ? '#dcfce7' : '#fef2f2', color: dslrCameras.length ? '#166534' : '#b91c1c', fontSize: '0.78rem', fontWeight: 700, lineHeight: 1.35 }}>
+                    {cameraMessage}
+                  </div>
                 )}
                 {(() => {
                   const status = getCameraProfileStatus(profile);
@@ -849,92 +1024,89 @@ function KioskSettingsTab() {
                   <input type="checkbox" checked={Boolean(profile.mirror)} onChange={(event) => updateCameraProfile(profile.id, { mirror: event.target.checked })} style={{ width: 17, height: 17, accentColor: '#f97316' }} />
                   Mirror preview & hasil
                 </label>
+
+                {profile.enabled && (
+                  <div style={{ marginTop: '1.25rem', paddingTop: '1.25rem', borderTop: '1px solid #e5e7eb' }}>
+                    <button
+                      type="button"
+                      onClick={() => handleTestCamera(profile.id)}
+                      disabled={isTestingCamera}
+                      style={{ width: '100%', padding: '0.85rem 1rem', background: '#f97316', color: 'white', border: 'none', borderRadius: '8px', cursor: isTestingCamera ? 'wait' : 'pointer', fontWeight: 'bold' }}
+                    >
+                      {isTestingCamera && previewCameraId === profile.id ? 'Menyalakan...' : `Test Kamera ${index + 1}`}
+                    </button>
+                    
+                    {previewCameraId === profile.id && (
+                      <div style={{ marginTop: '1rem' }}>
+                        <div style={{ background: '#111827', borderRadius: '12px', minHeight: '180px', overflow: 'hidden', display: 'grid', placeItems: 'center', border: '1px solid #1f2937', marginBottom: '0.75rem' }}>
+                          {previewImage ? (
+                            <img src={previewImage} alt="Hasil foto" style={{ width: '100%', height: '100%', minHeight: '180px', objectFit: 'contain', display: 'block' }} />
+                          ) : (
+                            <video
+                              ref={previewVideoRef}
+                              muted
+                              playsInline
+                              className={profile.mirror ? 'is-mirrored' : ''}
+                              style={{ width: '100%', height: '100%', minHeight: '180px', objectFit: 'cover', display: 'block' }}
+                            />
+                          )}
+                        </div>
+                        <button
+                          type="button"
+                          onClick={handleStopPreview}
+                          style={{ width: '100%', padding: '0.85rem 1rem', background: 'white', color: '#111827', border: '1px solid #d1d5db', borderRadius: '8px', cursor: 'pointer', fontWeight: 'bold' }}
+                        >
+                          Stop Preview
+                        </button>
+                        {cameraMessage && (
+                          <div style={{ marginTop: '0.75rem', padding: '0.8rem', borderRadius: '8px', background: '#f8fafc', border: '1px solid #e5e7eb', color: '#4b5563', fontSize: '0.82rem', lineHeight: 1.4 }}>
+                            {cameraMessage}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
             ))}
           </div>
-          <p style={{ margin: '0 0 1rem', fontSize: '0.78rem', color: '#868e96' }}>Pilih perangkat berbeda untuk Posisi 1 dan Posisi 2, lalu simpan. Customer akan memilih posisi setelah tiap foto.</p>
-
-          <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 180px', gap: '1rem', alignItems: 'stretch' }}>
-            <div style={{ background: '#111827', borderRadius: '12px', minHeight: '180px', overflow: 'hidden', display: 'grid', placeItems: 'center', border: '1px solid #1f2937' }}>
-              {previewImage ? <img src={previewImage} alt="Hasil foto DSLR" style={{ width: '100%', height: '100%', minHeight: '180px', objectFit: 'contain', display: 'block' }} /> : <video
-                ref={previewVideoRef}
-                muted
-                playsInline
-                className={settings.cameraProfiles?.find(profile => profile.id === previewCameraId)?.mirror ? 'is-mirrored' : ''}
-                style={{ width: '100%', height: '100%', minHeight: '180px', objectFit: 'cover', display: 'block' }}
-              />}
-            </div>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.65rem' }}>
-              {(settings.cameraProfiles || []).filter(profile => profile.enabled).map((profile, index) => (
-                <button
-                  key={profile.id}
-                  type="button"
-                  onClick={() => handleTestCamera(profile.id)}
-                  disabled={isTestingCamera}
-                  style={{ padding: '0.85rem 1rem', background: '#f97316', color: 'white', border: 'none', borderRadius: '8px', cursor: isTestingCamera ? 'wait' : 'pointer', fontWeight: 'bold' }}
-                >
-                  {isTestingCamera && previewCameraId === profile.id ? 'Menyalakan...' : `Test Kamera ${index + 1}`}
-                </button>
-              ))}
-              <button
-                type="button"
-                onClick={handleStopPreview}
-                style={{ padding: '0.85rem 1rem', background: 'white', color: '#111827', border: '1px solid #d1d5db', borderRadius: '8px', cursor: 'pointer', fontWeight: 'bold' }}
-              >
-                Stop Preview
-              </button>
-              {cameraMessage && (
-                <div style={{ padding: '0.8rem', borderRadius: '8px', background: 'white', color: '#6b7280', fontSize: '0.82rem', lineHeight: 1.4 }}>
-                  {cameraMessage}
-                </div>
-              )}
-            </div>
-          </div>
+          <p style={{ margin: '0 0 1rem', fontSize: '0.78rem', color: '#868e96' }}>Pilih ID Canon berbeda untuk setiap posisi. ID berformat canon:serial bersifat permanen; jangan simpan pilihan bertanda ID sementara.</p>
         </div>
 
         <div style={{ marginBottom: '1.5rem', padding: '1.25rem', borderRadius: '12px', border: '1px solid #e5e7eb', background: '#f8fafc' }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '1rem', marginBottom: '1rem' }}>
             <div>
               <label style={{ display: 'block', marginBottom: '0.35rem', fontWeight: 'bold', color: '#495057' }}>Printer Booth</label>
-              <p style={{ fontSize: '0.82rem', color: '#868e96', margin: 0 }}>Browser memakai printer default OS. Untuk print tanpa dialog, jalankan Chrome dengan kiosk printing.</p>
+              <p style={{ fontSize: '0.82rem', color: '#868e96', margin: 0 }}>Foto dikirim langsung oleh Hardware Agent ke driver Windows/HiTi, tanpa dialog print browser.</p>
             </div>
             <button
               type="button"
-              onClick={handleTestPrint}
-              style={{ padding: '0.65rem 1rem', background: '#111827', color: 'white', border: 'none', borderRadius: '8px', cursor: 'pointer', fontWeight: 'bold', whiteSpace: 'nowrap' }}
+              onClick={loadHardwarePrinters}
+              disabled={isLoadingPrinters}
+              style={{ padding: '0.65rem 1rem', background: '#111827', color: 'white', border: 'none', borderRadius: '8px', cursor: isLoadingPrinters ? 'wait' : 'pointer', fontWeight: 'bold', whiteSpace: 'nowrap' }}
             >
-              Test Print
+              {isLoadingPrinters ? 'Membaca...' : 'Refresh Printer'}
             </button>
           </div>
 
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem', marginBottom: '1rem' }}>
             <div>
               <label style={{ display: 'block', marginBottom: '0.45rem', fontWeight: 'bold', color: '#495057', fontSize: '0.9rem' }}>Mode Print</label>
-              <select
-                name="printMode"
-                value={settings.printMode || 'dialog'}
-                onChange={handleChange}
-                style={{ width: '100%', padding: '0.8rem', borderRadius: '8px', border: '1px solid #ced4da', fontSize: '1rem', backgroundColor: 'white' }}
-              >
-                <option value="dialog">Browser Dialog</option>
-                <option value="kiosk">Silent Kiosk Printing</option>
-              </select>
-              <p style={{ fontSize: '0.78rem', color: '#868e96', marginTop: '0.35rem' }}>
-                Silent kiosk butuh Chrome dijalankan dengan flag <code>--kiosk-printing</code>.
-              </p>
+              <div style={{ padding: '0.8rem', borderRadius: '8px', border: '1px solid #bbf7d0', background: '#f0fdf4', color: '#166534', fontWeight: 800 }}>Printer Windows melalui Hardware Agent</div>
+              <p style={{ fontSize: '0.78rem', color: '#868e96', marginTop: '0.35rem' }}>Menggunakan driver printer yang terpasang di Mini PC.</p>
             </div>
 
             <div>
-              <label style={{ display: 'block', marginBottom: '0.45rem', fontWeight: 'bold', color: '#495057', fontSize: '0.9rem' }}>Nama Printer / Catatan</label>
-              <input
-                type="text"
-                name="printerName"
+              <label style={{ display: 'block', marginBottom: '0.45rem', fontWeight: 'bold', color: '#495057', fontSize: '0.9rem' }}>Printer HiTi dari Windows</label>
+              <select
                 value={settings.printerName || ''}
-                onChange={handleChange}
-                placeholder="Contoh: Canon Selphy / DNP RX1"
-                style={{ width: '100%', padding: '0.8rem', borderRadius: '8px', border: '1px solid #ced4da', fontSize: '1rem' }}
-              />
-              <p style={{ fontSize: '0.78rem', color: '#868e96', marginTop: '0.35rem' }}>Sebagai label operator. Pemilihan printer fisik tetap dari OS/browser.</p>
+                onChange={(event) => setSettings(previous => ({ ...previous, printerName: event.target.value, printMode: 'hardware_agent' }))}
+                style={{ width: '100%', padding: '0.8rem', borderRadius: '8px', border: '1px solid #ced4da', fontSize: '1rem', background: 'white' }}
+              >
+                <option value="">Pilih printer dari Hardware Agent</option>
+                {hardwarePrinters.map(printer => <option key={printer.name} value={printer.name}>{printer.name}{printer.isDefault ? ' (Default Windows)' : ''}</option>)}
+              </select>
+              <p style={{ fontSize: '0.78rem', color: hardwarePrinters.length ? '#166534' : '#b91c1c', marginTop: '0.35rem' }}>{printerMessage || 'Klik Refresh Printer untuk membaca driver Windows.'}</p>
             </div>
           </div>
 
@@ -979,7 +1151,7 @@ function KioskSettingsTab() {
           <input 
             type="number" 
             name="idleTimeout" 
-            value={settings.idleTimeout} 
+            value={settings.idleTimeout ?? 60} 
             onChange={handleChange}
             min="10" max="300"
             style={{ width: '100%', padding: '0.8rem', borderRadius: '8px', border: '1px solid #ced4da', fontSize: '1rem' }}
@@ -1016,6 +1188,179 @@ const HealthPill = ({ status }) => {
 
 const createHealthItem = (id, label, status, detail, meta = '') => ({ id, label, status, detail, meta });
 
+import { FILTER_CATEGORIES, getEditorFilterStyle, fetchCustomFilters } from '../utils/photoConfig.js';
+
+function FilterManagementTab({ adminToken }) {
+  const [loading, setLoading] = useState(true);
+  const [showAddModal, setShowAddModal] = useState(false);
+  const [newFilter, setNewFilter] = useState({ name: '', category: 'CUSTOM', css: '', active: true });
+
+  const loadFilters = async () => {
+    setLoading(true);
+    await fetchCustomFilters();
+    setLoading(false);
+  };
+
+  useEffect(() => {
+    loadFilters();
+  }, []);
+
+  const handleSaveFilter = async () => {
+    if (!newFilter.name || !newFilter.css) {
+      alert('Nama dan Aturan CSS wajib diisi!');
+      return;
+    }
+    
+    try {
+      const res = await fetch('/api/admin/filters', {
+        method: 'POST',
+        headers: { 
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${adminToken}` 
+        },
+        body: JSON.stringify(newFilter)
+      });
+      if (res.ok) {
+        setShowAddModal(false);
+        setNewFilter({ name: '', category: 'CUSTOM', css: '', active: true });
+        loadFilters();
+      } else {
+        const err = await res.json();
+        alert('Gagal menyimpan filter: ' + (err.error || 'Unknown error'));
+      }
+    } catch (e) {
+      alert('Error: ' + e.message);
+    }
+  };
+
+  if (loading) {
+    return (
+      <div style={{ background: 'white', width: '100%', padding: '3rem', borderRadius: '12px', textAlign: 'center', color: '#6b7280' }}>
+        Memuat daftar filter...
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ background: 'white', width: '100%', padding: '2rem', borderRadius: '12px', border: '1px solid #e9ecef', boxShadow: '0 2px 8px rgba(0,0,0,0.02)' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.5rem' }}>
+        <div>
+          <h2 style={{ margin: 0, color: '#111827' }}>Manajemen Filter</h2>
+          <p style={{ margin: '0.4rem 0 0', color: '#6b7280' }}>Daftar efek warna filter yang tersedia untuk digunakan oleh pelanggan pada saat sesi foto (Studio Editor).</p>
+        </div>
+        <button 
+          onClick={() => setShowAddModal(true)}
+          style={{ background: '#f97316', color: 'white', border: 'none', padding: '0.6rem 1.2rem', borderRadius: '8px', fontWeight: 'bold', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '0.5rem', boxShadow: '0 2px 4px rgba(249, 115, 22, 0.2)' }}
+        >
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <line x1="12" y1="5" x2="12" y2="19"></line>
+            <line x1="5" y1="12" x2="19" y2="12"></line>
+          </svg>
+          Tambah Filter
+        </button>
+      </div>
+      
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '3rem', marginTop: '2rem' }}>
+        {Object.entries(FILTER_CATEGORIES).filter(([category]) => category !== 'ALL').map(([category, filters]) => (
+          <div key={category}>
+            <h3 style={{ borderBottom: '2px solid #e5e7eb', paddingBottom: '0.5rem', marginBottom: '1.5rem', color: '#374151', fontSize: '1.1rem' }}>
+              Kategori: {category}
+            </h3>
+            
+            {filters.length === 0 ? (
+              <p style={{ color: '#9ca3af', fontStyle: 'italic', fontSize: '0.9rem' }}>Belum ada filter di kategori ini.</p>
+            ) : (
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))', gap: '1.5rem' }}>
+                {filters.map(filterName => {
+                  const cssFilter = getEditorFilterStyle(filterName);
+                  return (
+                    <div key={filterName} style={{ background: '#ffffff', borderRadius: '12px', padding: '1rem', border: '1px solid #e5e7eb', boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.05)' }}>
+                      <div style={{ position: 'relative', width: '100%', aspectRatio: '4/5', borderRadius: '8px', overflow: 'hidden', marginBottom: '1rem' }}>
+                        <div style={{ width: '100%', height: '100%', background: 'url(https://images.unsplash.com/photo-1544005313-94ddf0286df2?w=400&h=500&fit=crop) center/cover', filter: cssFilter }}></div>
+                        <div style={{ position: 'absolute', top: '0', left: '0', background: '#2563eb', color: 'white', padding: '0.2rem 0.6rem', borderBottomRightRadius: '8px', fontSize: '0.75rem', fontWeight: 'bold' }}>
+                          LUT
+                        </div>
+                      </div>
+                      
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '0.25rem', padding: '0 0.25rem' }}>
+                        <h4 style={{ margin: 0, fontSize: '1.25rem', fontWeight: 'bold', color: '#111827' }}>{filterName}</h4>
+                        <p style={{ margin: 0, fontSize: '0.85rem', color: '#6b7280' }}>Terakhir Diperbarui: Jul 29 2026 at 20:22</p>
+                        <p style={{ margin: 0, fontSize: '0.85rem', color: '#6b7280' }}>Owned by me</p>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+
+      {showAddModal && (
+        <div style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 9999 }}>
+          <div style={{ background: 'white', padding: '2rem', borderRadius: '12px', width: '100%', maxWidth: '500px', boxShadow: '0 10px 25px rgba(0,0,0,0.2)' }}>
+            <h3 style={{ margin: '0 0 1.5rem', color: '#111827' }}>Tambah Filter Kustom</h3>
+            
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+              <div>
+                <label style={{ display: 'block', marginBottom: '0.5rem', fontSize: '0.9rem', color: '#374151', fontWeight: 'bold' }}>Nama Filter</label>
+                <input 
+                  type="text" 
+                  value={newFilter.name} 
+                  onChange={(e) => setNewFilter({...newFilter, name: e.target.value})}
+                  placeholder="Misal: RETRO BREEZE"
+                  style={{ width: '100%', padding: '0.75rem', border: '1px solid #d1d5db', borderRadius: '6px', fontSize: '1rem' }}
+                />
+              </div>
+
+              <div>
+                <label style={{ display: 'block', marginBottom: '0.5rem', fontSize: '0.9rem', color: '#374151', fontWeight: 'bold' }}>Kategori</label>
+                <select 
+                  value={newFilter.category} 
+                  onChange={(e) => setNewFilter({...newFilter, category: e.target.value})}
+                  style={{ width: '100%', padding: '0.75rem', border: '1px solid #d1d5db', borderRadius: '6px', fontSize: '1rem', background: 'white' }}
+                >
+                  <option value="CUSTOM">CUSTOM</option>
+                  <option value="ESSENTIAL">ESSENTIAL</option>
+                  <option value="RETRO">RETRO</option>
+                  <option value="FUN">FUN</option>
+                  <option value="COOL">COOL</option>
+                </select>
+              </div>
+
+              <div>
+                <label style={{ display: 'block', marginBottom: '0.5rem', fontSize: '0.9rem', color: '#374151', fontWeight: 'bold' }}>Aturan CSS (filter)</label>
+                <input 
+                  type="text" 
+                  value={newFilter.css} 
+                  onChange={(e) => setNewFilter({...newFilter, css: e.target.value})}
+                  placeholder="Misal: sepia(0.5) contrast(1.2) brightness(0.9)"
+                  style={{ width: '100%', padding: '0.75rem', border: '1px solid #d1d5db', borderRadius: '6px', fontSize: '1rem', fontFamily: 'monospace' }}
+                />
+                <p style={{ margin: '0.4rem 0 0', fontSize: '0.8rem', color: '#6b7280' }}>Masukkan value CSS filter (tanpa kata 'filter:').</p>
+              </div>
+            </div>
+
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '1rem', marginTop: '2rem' }}>
+              <button 
+                onClick={() => setShowAddModal(false)}
+                style={{ padding: '0.6rem 1.2rem', border: '1px solid #d1d5db', background: 'white', color: '#374151', borderRadius: '6px', cursor: 'pointer', fontWeight: 'bold' }}
+              >
+                Batal
+              </button>
+              <button 
+                onClick={handleSaveFilter}
+                style={{ padding: '0.6rem 1.2rem', border: 'none', background: '#2563eb', color: 'white', borderRadius: '6px', cursor: 'pointer', fontWeight: 'bold' }}
+              >
+                Simpan Filter
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
 function BoothHealthTab({ adminToken }) {
   const [items, setItems] = useState([]);
   const [checking, setChecking] = useState(false);
@@ -1052,32 +1397,29 @@ function BoothHealthTab({ adminToken }) {
     }
 
     try {
-      const devices = await listVideoDevices();
-      const selectedDevice = settings.cameraDeviceId
-        ? devices.find(device => device.deviceId === settings.cameraDeviceId)
-        : null;
-      const status = devices.length === 0 ? 'fail' : (settings.cameraDeviceId && !selectedDevice ? 'warn' : 'ok');
-      const detail = devices.length === 0
-        ? 'Tidak ada kamera terdeteksi.'
-        : settings.cameraDeviceId
-          ? selectedDevice
-            ? `Kamera terpilih tersedia: ${selectedDevice.label || settings.cameraDeviceLabel || 'Camera device'}.`
-            : 'Kamera tersimpan tidak ditemukan. Sistem akan fallback ke browser default.'
-          : `${devices.length} kamera tersedia. Sistem memakai browser default.`;
-      nextItems.push(createHealthItem('camera', 'Camera Device', status, detail, settings.mirrorCamera ? 'Mirror ON' : 'Mirror OFF'));
+      const cameras = await listDslrCameras();
+      const configured = (settings.cameraProfiles || []).filter(profile => profile.enabled);
+      const missing = configured.filter(profile => !profile.tetherPort || !cameras.some(camera => camera.port === profile.tetherPort));
+      const status = cameras.length === 0 ? 'fail' : (missing.length > 0 ? 'warn' : 'ok');
+      const detail = cameras.length === 0
+        ? 'Hardware Agent tidak mendeteksi Canon DSLR.'
+        : missing.length > 0
+          ? `${cameras.length} Canon DSLR terdeteksi, tetapi ${missing.length} posisi belum dipetakan.`
+          : `${cameras.length} Canon DSLR terdeteksi dan semua posisi aktif siap dipotret.`;
+      nextItems.push(createHealthItem('camera', 'Canon DSLR (EDSDK)', status, detail, `${configured.length} posisi aktif`));
     } catch (err) {
-      nextItems.push(createHealthItem('camera', 'Camera Device', 'fail', err.message || 'Tidak bisa membaca daftar kamera.'));
+      nextItems.push(createHealthItem('camera', 'Canon DSLR (EDSDK)', 'fail', err.message || 'Tidak bisa membaca Hardware Agent.'));
     }
 
     const printStatus = settings.autoPrintEnabled
-      ? (settings.printMode === 'kiosk' ? 'ok' : 'warn')
+      ? (settings.printerName ? 'ok' : 'warn')
       : 'warn';
     const printDetail = settings.autoPrintEnabled
-      ? settings.printMode === 'kiosk'
-        ? 'Auto print aktif. Pastikan Chrome dibuka dengan --kiosk-printing dan printer default OS sudah benar.'
-        : 'Auto print aktif, tetapi browser dialog tetap akan muncul.'
+      ? settings.printerName
+        ? `Auto print aktif melalui Hardware Agent ke ${settings.printerName}.`
+        : 'Auto print aktif, tetapi printer belum dipilih.'
       : 'Auto print mati. Operator perlu klik PRINT PHOTO manual.';
-    nextItems.push(createHealthItem('printer', 'Printer Flow', printStatus, printDetail, settings.printerName || 'Printer default OS/browser'));
+    nextItems.push(createHealthItem('printer', 'Hardware Printer', printStatus, printDetail, settings.printerName || 'Belum dipilih'));
 
     try {
       const key = `booth_health_probe_${Date.now()}`;
@@ -2857,6 +3199,7 @@ function TransactionTab({ adminToken }) {
   const [logsError, setLogsError] = useState('');
   const [transactionPage, setTransactionPage] = useState(1);
   const [transactionPageSize, setTransactionPageSize] = useState(10);
+  const [statusFilter, setStatusFilter] = useState('ALL');
 
   const loadPaymentLogs = async () => {
     if (!adminToken) return;
@@ -2876,17 +3219,19 @@ function TransactionTab({ adminToken }) {
     loadPaymentLogs();
   }, [adminToken]);
 
+  const filteredLogs = paymentLogs.filter(log => statusFilter === 'ALL' || (log.statusAfter || '').toLowerCase() === statusFilter.toLowerCase());
+
   const paidPaymentIds = new Set();
-  const totalRevenue = paymentLogs.reduce((acc, log) => {
+  const totalRevenue = filteredLogs.reduce((acc, log) => {
     if ((log.statusAfter === 'paid' || log.statusAfter === 'success') && !paidPaymentIds.has(log.paymentId)) {
       paidPaymentIds.add(log.paymentId);
       return acc + Number(log.amount || 0);
     }
     return acc;
   }, 0);
-  const transactionTotalPages = Math.max(1, Math.ceil(paymentLogs.length / transactionPageSize));
+  const transactionTotalPages = Math.max(1, Math.ceil(filteredLogs.length / transactionPageSize));
   const transactionStartIndex = (transactionPage - 1) * transactionPageSize;
-  const paginatedPaymentLogs = paymentLogs.slice(transactionStartIndex, transactionStartIndex + transactionPageSize);
+  const paginatedPaymentLogs = filteredLogs.slice(transactionStartIndex, transactionStartIndex + transactionPageSize);
 
   useEffect(() => {
     if (transactionPage > transactionTotalPages) {
@@ -2930,14 +3275,24 @@ function TransactionTab({ adminToken }) {
             Estimasi pendapatan berhasil: <span style={{ color: '#10B981', fontWeight: 'bold' }}>{formatCurrency(totalRevenue)}</span>
           </p>
         </div>
-        <div style={{ display: 'flex', gap: '0.5rem' }}>
-          <button onClick={loadPaymentLogs} style={{ padding: '0.6rem 1rem', background: '#f8f9fa', color: '#111', border: '1px solid #e9ecef', borderRadius: '6px', cursor: 'pointer', fontWeight: 'bold' }}>
+        <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+          <select
+            value={statusFilter}
+            onChange={(e) => { setStatusFilter(e.target.value); setTransactionPage(1); }}
+            style={{ height: '42px', padding: '0 1rem', borderRadius: '6px', border: '1px solid #e9ecef', background: '#f8f9fa', fontSize: '0.9rem', color: '#111', fontWeight: 'bold', cursor: 'pointer', outline: 'none', boxSizing: 'border-box' }}
+          >
+            <option value="ALL">Semua Status</option>
+            <option value="paid">Paid</option>
+            <option value="pending">Pending</option>
+            <option value="failed">Failed</option>
+          </select>
+          <button onClick={loadPaymentLogs} style={{ height: '42px', padding: '0 1rem', background: '#f8f9fa', color: '#111', border: '1px solid #e9ecef', borderRadius: '6px', cursor: 'pointer', fontWeight: 'bold', boxSizing: 'border-box' }}>
             Refresh
           </button>
-          <button onClick={exportPaymentLogsToXLS} style={{ padding: '0.6rem 1rem', background: '#f97316', color: 'white', border: 'none', borderRadius: '6px', cursor: 'pointer', fontWeight: 'bold' }}>
+          <button onClick={exportPaymentLogsToXLS} style={{ height: '42px', padding: '0 1rem', background: '#f97316', color: 'white', border: 'none', borderRadius: '6px', cursor: 'pointer', fontWeight: 'bold', boxSizing: 'border-box' }}>
             ↓ Export XLS
           </button>
-          <button onClick={handleClear} style={{ display: 'none', padding: '0.6rem 1rem', background: '#fee2e2', color: '#ef4444', border: 'none', borderRadius: '6px', cursor: 'pointer', fontWeight: 'bold' }}>
+          <button onClick={handleClear} style={{ display: 'none', height: '42px', padding: '0 1rem', background: '#fee2e2', color: '#ef4444', border: 'none', borderRadius: '6px', cursor: 'pointer', fontWeight: 'bold', boxSizing: 'border-box' }}>
             Clear Logs
           </button>
         </div>
@@ -2953,9 +3308,9 @@ function TransactionTab({ adminToken }) {
         <div style={{ textAlign: 'center', padding: '4rem 2rem', border: '1px dashed #ced4da', borderRadius: '8px', color: '#6c757d' }}>
           Memuat payment log...
         </div>
-      ) : paymentLogs.length === 0 ? (
+      ) : filteredLogs.length === 0 ? (
         <div style={{ textAlign: 'center', padding: '4rem 2rem', border: '1px dashed #ced4da', borderRadius: '8px', color: '#6c757d' }}>
-          Belum ada payment log dari backend.
+          Belum ada payment log yang sesuai filter.
         </div>
       ) : (
         <div style={{ overflowX: 'auto' }}>
@@ -2996,7 +3351,7 @@ function TransactionTab({ adminToken }) {
             page={transactionPage}
             totalPages={transactionTotalPages}
             pageSize={transactionPageSize}
-            total={paymentLogs.length}
+            total={filteredLogs.length}
             onPageChange={setTransactionPage}
             onPageSizeChange={(size) => {
               setTransactionPageSize(size);
@@ -3932,76 +4287,178 @@ function formatDetailValue(value, column) {
 }
 
 const emptyVoucherForm = {
-  id: '',
   code: '',
   name: '',
   type: 'fixed',
-  value: '',
-  minAmount: '',
-  maxDiscount: '',
-  usageLimit: '',
+  value: 0,
+  minAmount: 0,
+  maxDiscount: 0,
+  usageLimit: 0,
   active: true,
   startsAt: '',
-  endsAt: '',
+  endsAt: ''
 };
 
-const toDateInputValue = (value) => {
-  if (!value) return '';
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return '';
-  return date.toISOString().slice(0, 10);
+const toDateInputValue = (dateString) => {
+  if (!dateString) return '';
+  return new Date(dateString).toISOString().split('T')[0];
 };
 
-const dateInputToISOString = (value, endOfDay = false) => {
-  if (!value) return null;
-  return `${value}T${endOfDay ? '23:59:59' : '00:00:00'}Z`;
+const dateInputToISOString = (dateString, isEndOfDay = false) => {
+  if (!dateString) return null;
+  const d = new Date(dateString);
+  if (isEndOfDay) {
+    d.setHours(23, 59, 59, 999);
+  } else {
+    d.setHours(0, 0, 0, 0);
+  }
+  return d.toISOString();
 };
 
 const voucherStatus = (voucher) => {
-  const now = Date.now();
   if (!voucher.active) return 'inactive';
-  if (voucher.startsAt && new Date(voucher.startsAt).getTime() > now) return 'scheduled';
-  if (voucher.endsAt && new Date(voucher.endsAt).getTime() < now) return 'expired';
-  if (Number(voucher.usageLimit || 0) > 0 && Number(voucher.usedCount || 0) >= Number(voucher.usageLimit || 0)) return 'used up';
+  const now = new Date();
+  if (voucher.startsAt && new Date(voucher.startsAt) > now) return 'scheduled';
+  if (voucher.endsAt && new Date(voucher.endsAt) < now) return 'expired';
+  if (voucher.usageLimit > 0 && voucher.usedCount >= voucher.usageLimit) return 'depleted';
   return 'active';
 };
 
+function AddVoucherModal({ isOpen, onClose, form, updateForm, saveVoucher, saving, error, isEdit }) {
+  if (!isOpen) return null;
+  return (
+    <div style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(0,0,0,0.5)', zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '1rem' }}>
+      <div style={{ background: 'white', borderRadius: '12px', padding: '2rem', width: '100%', maxWidth: '500px', maxHeight: '90vh', overflowY: 'auto' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.5rem' }}>
+          <h2 style={{ margin: 0, color: '#111827', fontSize: '1.25rem' }}>{isEdit ? 'Edit Voucher' : 'Buat Voucher Baru'}</h2>
+          <button onClick={onClose} style={{ background: 'none', border: 'none', fontSize: '1.5rem', cursor: 'pointer', color: '#6b7280' }}>&times;</button>
+        </div>
+        
+        {error && <div style={{ padding: '0.85rem 1rem', borderRadius: '8px', background: '#fee2e2', color: '#991b1b', marginBottom: '1rem', fontWeight: 600, fontSize: '0.9rem' }}>{error}</div>}
+
+        <form onSubmit={saveVoucher} style={{ display: 'grid', gap: '1rem' }}>
+          <label style={{ display: 'grid', gap: '0.35rem', color: '#374151', fontSize: '0.9rem', fontWeight: 600 }}>
+            Kode Voucher
+            <input value={form.code} onChange={e => updateForm('code', e.target.value.toUpperCase())} placeholder="PROMO2026" required maxLength={32} style={{ padding: '0.75rem', border: '1px solid #d1d5db', borderRadius: '8px', textTransform: 'uppercase' }} />
+          </label>
+
+          <label style={{ display: 'grid', gap: '0.35rem', color: '#374151', fontSize: '0.9rem', fontWeight: 600 }}>
+            Nama Voucher (Opsional)
+            <input value={form.name} onChange={e => updateForm('name', e.target.value)} placeholder="Diskon Spesial" style={{ padding: '0.75rem', border: '1px solid #d1d5db', borderRadius: '8px' }} />
+          </label>
+
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
+            <label style={{ display: 'grid', gap: '0.35rem', color: '#374151', fontSize: '0.9rem', fontWeight: 600 }}>
+              Tipe Diskon
+              <select value={form.type} onChange={e => updateForm('type', e.target.value)} style={{ padding: '0.75rem', border: '1px solid #d1d5db', borderRadius: '8px', background: 'white' }}>
+                <option value="fixed">Tunai (Rp)</option>
+                <option value="percent">Diskon (%)</option>
+              </select>
+            </label>
+            <label style={{ display: 'grid', gap: '0.35rem', color: '#374151', fontSize: '0.9rem', fontWeight: 600 }}>
+              Nilai
+              <input type="number" min="1" max={form.type === 'percent' ? "100" : undefined} value={form.value} onChange={e => updateForm('value', e.target.value)} placeholder={form.type === 'percent' ? '10' : '5000'} required style={{ padding: '0.75rem', border: '1px solid #d1d5db', borderRadius: '8px' }} />
+            </label>
+          </div>
+
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
+            <label style={{ display: 'grid', gap: '0.35rem', color: '#374151', fontSize: '0.9rem', fontWeight: 600 }}>
+              Mulai (Opsional)
+              <input type="date" value={form.startsAt} onChange={e => updateForm('startsAt', e.target.value)} style={{ padding: '0.75rem', border: '1px solid #d1d5db', borderRadius: '8px' }} />
+            </label>
+            <label style={{ display: 'grid', gap: '0.35rem', color: '#374151', fontSize: '0.9rem', fontWeight: 600 }}>
+              Berakhir (Opsional)
+              <input type="date" value={form.endsAt} onChange={e => updateForm('endsAt', e.target.value)} style={{ padding: '0.75rem', border: '1px solid #d1d5db', borderRadius: '8px' }} />
+            </label>
+          </div>
+
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem', alignItems: 'end' }}>
+            <label style={{ display: 'grid', gap: '0.35rem', color: '#374151', fontSize: '0.9rem', fontWeight: 600 }}>
+              Limit Pemakaian
+              <input type="number" min="0" value={form.usageLimit} onChange={e => updateForm('usageLimit', e.target.value)} placeholder="0 = unlimited" style={{ padding: '0.75rem', border: '1px solid #d1d5db', borderRadius: '8px' }} />
+            </label>
+            <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '0.75rem', border: '1px solid #d1d5db', borderRadius: '8px', color: '#374151', fontWeight: 600 }}>
+              <input type="checkbox" checked={form.active} onChange={e => updateForm('active', e.target.checked)} />
+              Aktif
+            </label>
+          </div>
+
+          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '1rem', marginTop: '1.5rem' }}>
+            <button type="button" onClick={onClose} style={{ padding: '0.75rem 1.5rem', borderRadius: '8px', border: '1px solid #d1d5db', background: 'white', color: '#374151', fontWeight: 600, cursor: 'pointer' }}>Batal</button>
+            <button type="submit" disabled={saving} style={{ padding: '0.75rem 1.5rem', borderRadius: '8px', border: 'none', background: '#2563eb', color: 'white', fontWeight: 600, cursor: saving ? 'wait' : 'pointer' }}>
+              {saving ? 'Menyimpan...' : 'Simpan Voucher'}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
 function VoucherSettingsTab({ adminToken }) {
   const [vouchers, setVouchers] = useState([]);
+  const [activeTab, setActiveTab] = useState('tunai'); // 'tunai' | 'diskon'
+  const [selectedIds, setSelectedIds] = useState(new Set());
+  const [isModalOpen, setIsModalOpen] = useState(false);
+  
   const [form, setForm] = useState(emptyVoucherForm);
   const [editingId, setEditingId] = useState('');
+  
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
 
   const loadVouchers = async () => {
     if (!adminToken) return;
     setLoading(true);
-    setError('');
     try {
       const data = await backendRequest('/api/admin/vouchers', adminToken);
       setVouchers(Array.isArray(data) ? data : []);
     } catch (err) {
-      setError(err.message || 'Gagal memuat voucher.');
+      console.error(err);
     } finally {
       setLoading(false);
     }
   };
 
-  useEffect(() => {
-    loadVouchers();
-  }, [adminToken]);
+  useEffect(() => { loadVouchers(); }, [adminToken]);
+
+  const filteredVouchers = vouchers.filter(v => activeTab === 'tunai' ? v.type === 'fixed' : v.type === 'percent');
+  const isAllSelected = filteredVouchers.length > 0 && filteredVouchers.every(v => selectedIds.has(v.id));
+
+  const toggleSelectAll = () => {
+    if (isAllSelected) {
+      setSelectedIds(new Set());
+    } else {
+      setSelectedIds(new Set(filteredVouchers.map(v => v.id)));
+    }
+  };
+
+  const toggleSelect = (id) => {
+    const next = new Set(selectedIds);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    setSelectedIds(next);
+  };
 
   const resetForm = () => {
     setForm(emptyVoucherForm);
     setEditingId('');
   };
 
-  const editVoucher = (voucher) => {
+  const openModalNew = () => {
+    resetForm();
+    updateForm('type', activeTab === 'tunai' ? 'fixed' : 'percent');
+    setIsModalOpen(true);
+    setError('');
+  };
+
+  const openModalEdit = (voucher) => {
     setEditingId(voucher.id);
     setForm({
-      id: voucher.id || '',
+      id: voucher.id,
       code: voucher.code || '',
       name: voucher.name || '',
       type: voucher.type || 'fixed',
@@ -4013,6 +4470,8 @@ function VoucherSettingsTab({ adminToken }) {
       startsAt: toDateInputValue(voucher.startsAt),
       endsAt: toDateInputValue(voucher.endsAt),
     });
+    setIsModalOpen(true);
+    setError('');
   };
 
   const updateForm = (key, value) => {
@@ -4039,6 +4498,11 @@ function VoucherSettingsTab({ adminToken }) {
         startsAt: dateInputToISOString(form.startsAt),
         endsAt: dateInputToISOString(form.endsAt, true),
       };
+
+      if (payload.type === 'percent' && payload.value > 100) {
+        throw new Error('Persentase diskon tidak boleh lebih dari 100%.');
+      }
+
       const endpoint = editingId ? `/api/admin/vouchers/${editingId}` : '/api/admin/vouchers';
       const saved = await backendRequest(endpoint, adminToken, {
         method: editingId ? 'PUT' : 'POST',
@@ -4049,6 +4513,7 @@ function VoucherSettingsTab({ adminToken }) {
         return exists ? prev.map(item => item.id === saved.id ? saved : item) : [saved, ...prev];
       });
       setMessage(`Voucher ${saved.code} berhasil disimpan.`);
+      setIsModalOpen(false);
       resetForm();
     } catch (err) {
       setError(err.message || 'Gagal menyimpan voucher.');
@@ -4057,188 +4522,170 @@ function VoucherSettingsTab({ adminToken }) {
     }
   };
 
-  const deleteVoucher = async (voucher) => {
+  const deleteSelected = async () => {
+    if (selectedIds.size === 0) return;
+    if (!window.confirm(`Yakin ingin menghapus ${selectedIds.size} voucher terpilih?`)) return;
+    setDeleting(true);
+    try {
+      await backendRequest('/api/admin/vouchers/bulk-delete', adminToken, {
+        method: 'POST',
+        body: JSON.stringify({ ids: Array.from(selectedIds) }),
+      });
+      setVouchers(prev => prev.filter(item => !selectedIds.has(item.id)));
+      setSelectedIds(new Set());
+      setMessage('Voucher terpilih berhasil dihapus.');
+    } catch (err) {
+      alert('Gagal menghapus voucher: ' + err.message);
+    } finally {
+      setDeleting(false);
+    }
+  };
+
+  const deleteSingle = async (voucher) => {
     if (!window.confirm(`Hapus voucher ${voucher.code}?`)) return;
-    setError('');
-    setMessage('');
     try {
       await backendRequest(`/api/admin/vouchers/${voucher.id}`, adminToken, { method: 'DELETE' });
       setVouchers(prev => prev.filter(item => item.id !== voucher.id));
-      if (editingId === voucher.id) resetForm();
-      setMessage(`Voucher ${voucher.code} berhasil dihapus.`);
     } catch (err) {
-      setError(err.message || 'Gagal menghapus voucher.');
+      alert('Gagal menghapus voucher: ' + err.message);
     }
   };
-
-  const toggleVoucher = async (voucher) => {
-    setError('');
-    setMessage('');
-    try {
-      const saved = await backendRequest(`/api/admin/vouchers/${voucher.id}`, adminToken, {
-        method: 'PUT',
-        body: JSON.stringify({
-          ...voucher,
-          active: !voucher.active,
-          startsAt: voucher.startsAt || null,
-          endsAt: voucher.endsAt || null,
-        }),
-      });
-      setVouchers(prev => prev.map(item => item.id === saved.id ? saved : item));
-      setMessage(`Voucher ${saved.code} ${saved.active ? 'diaktifkan' : 'dinonaktifkan'}.`);
-    } catch (err) {
-      setError(err.message || 'Gagal mengubah status voucher.');
-    }
-  };
-
-  const stats = vouchers.reduce((acc, voucher) => {
-    acc.total += 1;
-    if (voucherStatus(voucher) === 'active') acc.active += 1;
-    acc.used += Number(voucher.usedCount || 0);
-    return acc;
-  }, { total: 0, active: 0, used: 0 });
 
   return (
-    <div style={{ display: 'grid', gridTemplateColumns: 'minmax(360px, 0.85fr) minmax(0, 1.15fr)', gap: '1.25rem', alignItems: 'start' }}>
-      <form onSubmit={saveVoucher} style={{ background: 'white', padding: '2rem', borderRadius: '12px', border: '1px solid #e9ecef', boxShadow: '0 2px 8px rgba(0,0,0,0.02)', display: 'grid', gap: '1rem' }}>
-        <div>
-          <h2 style={{ margin: 0, color: '#111827' }}>Voucher Settings</h2>
-          <p style={{ margin: '0.25rem 0 0', color: '#64748b', fontSize: '0.9rem' }}>{editingId ? 'Edit voucher promo.' : 'Buat voucher promo baru.'}</p>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '2rem' }}>
+      <AddVoucherModal
+        isOpen={isModalOpen}
+        onClose={() => setIsModalOpen(false)}
+        form={form}
+        updateForm={updateForm}
+        saveVoucher={saveVoucher}
+        saving={saving}
+        error={error}
+        isEdit={!!editingId}
+      />
+
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+        <h2 style={{ margin: 0, color: '#111827', fontSize: '1.5rem', fontWeight: 700 }}>Manajemen Voucher</h2>
+        <p style={{ margin: 0, color: '#6b7280' }}>Kelola voucher tunai dan diskon untuk proyek Anda.</p>
+      </div>
+
+      {message && <div style={{ padding: '0.75rem 1rem', background: '#dcfce7', color: '#166534', borderRadius: '8px', fontWeight: 600 }}>{message}</div>}
+
+      <div style={{ borderBottom: '1px solid #e5e7eb', display: 'flex', gap: '2rem' }}>
+        <button
+          onClick={() => { setActiveTab('tunai'); setSelectedIds(new Set()); }}
+          style={{ padding: '0.75rem 0', background: 'none', border: 'none', borderBottom: activeTab === 'tunai' ? '2px solid #2563eb' : '2px solid transparent', color: activeTab === 'tunai' ? '#2563eb' : '#6b7280', fontWeight: 600, fontSize: '0.95rem', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '0.5rem' }}
+        >
+          Voucher Tunai
+          <span style={{ padding: '2px 8px', borderRadius: '999px', background: activeTab === 'tunai' ? '#eff6ff' : '#f3f4f6', color: activeTab === 'tunai' ? '#1d4ed8' : '#6b7280', fontSize: '0.75rem' }}>{vouchers.filter(v => v.type === 'fixed').length}</span>
+        </button>
+        <button
+          onClick={() => { setActiveTab('diskon'); setSelectedIds(new Set()); }}
+          style={{ padding: '0.75rem 0', background: 'none', border: 'none', borderBottom: activeTab === 'diskon' ? '2px solid #2563eb' : '2px solid transparent', color: activeTab === 'diskon' ? '#2563eb' : '#6b7280', fontWeight: 600, fontSize: '0.95rem', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '0.5rem' }}
+        >
+          Voucher Diskon
+          <span style={{ padding: '2px 8px', borderRadius: '999px', background: activeTab === 'diskon' ? '#eff6ff' : '#f3f4f6', color: activeTab === 'diskon' ? '#1d4ed8' : '#6b7280', fontSize: '0.75rem' }}>{vouchers.filter(v => v.type === 'percent').length}</span>
+        </button>
+      </div>
+
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+        <h3 style={{ margin: 0, color: '#111827', fontSize: '1.25rem' }}>
+          {activeTab === 'tunai' ? 'Voucher Tunai' : 'Voucher Diskon'}
+        </h3>
+        <p style={{ margin: 0, color: '#6b7280', fontSize: '0.9rem' }}>
+          {activeTab === 'tunai' ? 'Kode untuk pembayaran dengan potongan harga nominal tetap.' : 'Kode untuk pembayaran dengan potongan harga persentase.'}
+        </p>
+        
+        <div style={{ display: 'flex', gap: '0.75rem', marginTop: '0.5rem' }}>
+          <button onClick={openModalNew} style={{ padding: '0.65rem 1.25rem', background: '#2563eb', color: 'white', border: 'none', borderRadius: '6px', fontWeight: 600, cursor: 'pointer' }}>
+            Buat Voucher {activeTab === 'tunai' ? 'Tunai' : 'Diskon'}
+          </button>
+          <button style={{ padding: '0.65rem 1.25rem', background: '#10b981', color: 'white', border: 'none', borderRadius: '6px', fontWeight: 600, cursor: 'pointer' }}>
+            Upload Tabel Voucher
+          </button>
         </div>
 
-        {message && <div style={{ padding: '0.85rem 1rem', borderRadius: '10px', background: '#dcfce7', color: '#166534', fontWeight: 800 }}>{message}</div>}
-        {error && <div style={{ padding: '0.85rem 1rem', borderRadius: '10px', background: '#fee2e2', color: '#991b1b', fontWeight: 800 }}>{error}</div>}
-
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.8rem' }}>
-          {[
-            ['Total Voucher', stats.total],
-            ['Aktif', stats.active],
-            ['Terpakai', stats.used],
-            ['Nonaktif', Math.max(0, stats.total - stats.active)],
-          ].map(([label, value]) => (
-            <div key={label} style={{ padding: '0.9rem', borderRadius: '10px', border: '1px solid #e5e7eb', background: '#f8fafc' }}>
-              <div style={{ color: '#64748b', fontSize: '0.74rem', fontWeight: 900 }}>{label}</div>
-              <div style={{ color: '#111827', fontSize: '1.6rem', fontWeight: 950 }}>{value}</div>
-            </div>
-          ))}
+        <div style={{ display: 'flex', gap: '0.5rem', padding: '0.5rem', background: '#f8fafc', border: '1px solid #e5e7eb', borderRadius: '8px', width: 'fit-content', marginTop: '0.5rem' }}>
+          <button disabled style={{ padding: '0.4rem 0.75rem', background: 'none', border: 'none', color: '#9ca3af', fontWeight: 600, cursor: 'not-allowed' }}>
+            Unduh Terpilih ({selectedIds.size})
+          </button>
+          <div style={{ width: '1px', background: '#e5e7eb', margin: '0.25rem 0' }}></div>
+          <button onClick={deleteSelected} disabled={selectedIds.size === 0 || deleting} style={{ padding: '0.4rem 0.75rem', background: 'none', border: 'none', color: selectedIds.size > 0 ? '#dc2626' : '#9ca3af', fontWeight: 600, cursor: selectedIds.size > 0 ? 'pointer' : 'not-allowed' }}>
+            {deleting ? 'Menghapus...' : `Hapus Terpilih (${selectedIds.size})`}
+          </button>
+          <div style={{ width: '1px', background: '#e5e7eb', margin: '0.25rem 0' }}></div>
+          <button disabled style={{ padding: '0.4rem 0.75rem', background: 'none', border: 'none', color: '#9ca3af', fontWeight: 600, cursor: 'not-allowed' }}>
+            Unduh Tabel
+          </button>
         </div>
+      </div>
 
-        <label style={{ display: 'grid', gap: '0.35rem', color: '#475569', fontWeight: 900 }}>
-          Kode Voucher
-          <input value={form.code} onChange={event => updateForm('code', event.target.value.toUpperCase())} placeholder="EVENT10" required maxLength={32} style={{ padding: '0.85rem 1rem', border: '1px solid #d1d5db', borderRadius: '8px', fontWeight: 900, textTransform: 'uppercase' }} />
-        </label>
-
-        <label style={{ display: 'grid', gap: '0.35rem', color: '#475569', fontWeight: 900 }}>
-          Nama Voucher
-          <input value={form.name} onChange={event => updateForm('name', event.target.value)} placeholder="Diskon Event" style={{ padding: '0.85rem 1rem', border: '1px solid #d1d5db', borderRadius: '8px', fontWeight: 800 }} />
-        </label>
-
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.8rem' }}>
-          <label style={{ display: 'grid', gap: '0.35rem', color: '#475569', fontWeight: 900 }}>
-            Tipe Diskon
-            <select value={form.type} onChange={event => updateForm('type', event.target.value)} style={{ padding: '0.85rem 1rem', border: '1px solid #d1d5db', borderRadius: '8px', background: 'white', fontWeight: 900 }}>
-              <option value="fixed">Nominal Rupiah</option>
-              <option value="percent">Persentase</option>
+      <div style={{ border: '1px solid #e5e7eb', borderRadius: '12px', background: 'white', overflow: 'hidden' }}>
+        <div style={{ overflowX: 'auto' }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left', minWidth: '800px' }}>
+            <thead style={{ background: '#f9fafb', borderBottom: '1px solid #e5e7eb' }}>
+              <tr>
+                <th style={{ padding: '1rem', width: '40px' }}>
+                  <input type="checkbox" checked={isAllSelected} onChange={toggleSelectAll} style={{ cursor: 'pointer' }} />
+                </th>
+                <th style={{ padding: '1rem', color: '#4b5563', fontSize: '0.75rem', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Kode</th>
+                <th style={{ padding: '1rem', color: '#4b5563', fontSize: '0.75rem', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Nilai</th>
+                <th style={{ padding: '1rem', color: '#4b5563', fontSize: '0.75rem', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Ketersediaan</th>
+                <th style={{ padding: '1rem', color: '#4b5563', fontSize: '0.75rem', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Masa Berlaku</th>
+                <th style={{ padding: '1rem', color: '#4b5563', fontSize: '0.75rem', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Status</th>
+                <th style={{ padding: '1rem', color: '#4b5563', fontSize: '0.75rem', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Pembuat</th>
+                <th style={{ padding: '1rem', color: '#4b5563', fontSize: '0.75rem', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', textAlign: 'right' }}>Aksi</th>
+              </tr>
+            </thead>
+            <tbody>
+              {loading ? (
+                <tr><td colSpan="7" style={{ padding: '2rem', textAlign: 'center', color: '#6b7280' }}>Memuat data...</td></tr>
+              ) : filteredVouchers.length === 0 ? (
+                <tr><td colSpan="7" style={{ padding: '3rem', textAlign: 'center', color: '#9ca3af' }}>Tidak ada data voucher.</td></tr>
+              ) : (
+                filteredVouchers.map(v => (
+                  <tr key={v.id} style={{ borderBottom: '1px solid #f3f4f6', background: selectedIds.has(v.id) ? '#f0fdf4' : 'transparent' }}>
+                    <td style={{ padding: '1rem' }}>
+                      <input type="checkbox" checked={selectedIds.has(v.id)} onChange={() => toggleSelect(v.id)} style={{ cursor: 'pointer' }} />
+                    </td>
+                    <td style={{ padding: '1rem', fontWeight: 600, color: '#111827' }}>{v.code}</td>
+                    <td style={{ padding: '1rem', color: '#4b5563', fontWeight: 500 }}>{v.type === 'percent' ? `${v.value}%` : formatCurrency(v.value)}</td>
+                    <td style={{ padding: '1rem', color: '#4b5563' }}>{v.usageLimit ? `${v.usedCount || 0} / ${v.usageLimit}` : 'Tidak terbatas'}</td>
+                    <td style={{ padding: '1rem', color: '#4b5563', fontSize: '0.85rem' }}>
+                      {v.startsAt ? new Date(v.startsAt).toLocaleDateString() : '-'} s/d {v.endsAt ? new Date(v.endsAt).toLocaleDateString() : '-'}
+                    </td>
+                    <td style={{ padding: '1rem' }}>
+                      <StatusBadge status={voucherStatus(v)} />
+                    </td>
+                    <td style={{ padding: '1rem', color: '#4b5563', fontSize: '0.85rem' }}>
+                      {v.createdBy || '-'}
+                    </td>
+                    <td style={{ padding: '1rem', textAlign: 'right' }}>
+                      <button onClick={() => openModalEdit(v)} style={{ padding: '0.4rem 0.75rem', background: 'none', border: '1px solid #e5e7eb', borderRadius: '6px', color: '#374151', fontSize: '0.85rem', fontWeight: 600, cursor: 'pointer', marginRight: '0.5rem' }}>Edit</button>
+                      <button onClick={() => deleteSingle(v)} style={{ padding: '0.4rem 0.75rem', background: 'none', border: '1px solid #fee2e2', borderRadius: '6px', color: '#dc2626', fontSize: '0.85rem', fontWeight: 600, cursor: 'pointer' }}>Hapus</button>
+                    </td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+        <div style={{ padding: '1rem', background: '#f9fafb', display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderTop: '1px solid #e5e7eb' }}>
+          <div style={{ fontSize: '0.85rem', color: '#6b7280' }}>
+            Menampilkan 1 - {filteredVouchers.length} dari {filteredVouchers.length} data
+          </div>
+          <div style={{ fontSize: '0.85rem', color: '#6b7280' }}>
+            Tampilkan per halaman: 
+            <select style={{ marginLeft: '0.5rem', padding: '0.25rem 1rem 0.25rem 0.5rem', border: '1px solid #d1d5db', borderRadius: '4px' }}>
+              <option>25</option>
             </select>
-          </label>
-          <label style={{ display: 'grid', gap: '0.35rem', color: '#475569', fontWeight: 900 }}>
-            Nilai
-            <input type="number" min="1" value={form.value} onChange={event => updateForm('value', event.target.value)} placeholder={form.type === 'percent' ? '10' : '5000'} required style={{ padding: '0.85rem 1rem', border: '1px solid #d1d5db', borderRadius: '8px', fontWeight: 900 }} />
-          </label>
-        </div>
-
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.8rem' }}>
-          <label style={{ display: 'grid', gap: '0.35rem', color: '#475569', fontWeight: 900 }}>
-            Minimum Belanja
-            <input type="number" min="0" value={form.minAmount} onChange={event => updateForm('minAmount', event.target.value)} placeholder="0" style={{ padding: '0.85rem 1rem', border: '1px solid #d1d5db', borderRadius: '8px', fontWeight: 900 }} />
-          </label>
-          <label style={{ display: 'grid', gap: '0.35rem', color: '#475569', fontWeight: 900 }}>
-            Maks Diskon
-            <input type="number" min="0" value={form.maxDiscount} onChange={event => updateForm('maxDiscount', event.target.value)} placeholder="0" style={{ padding: '0.85rem 1rem', border: '1px solid #d1d5db', borderRadius: '8px', fontWeight: 900 }} />
-          </label>
-        </div>
-
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.8rem' }}>
-          <label style={{ display: 'grid', gap: '0.35rem', color: '#475569', fontWeight: 900 }}>
-            Mulai
-            <input type="date" value={form.startsAt} onChange={event => updateForm('startsAt', event.target.value)} style={{ padding: '0.85rem 1rem', border: '1px solid #d1d5db', borderRadius: '8px', fontWeight: 900 }} />
-          </label>
-          <label style={{ display: 'grid', gap: '0.35rem', color: '#475569', fontWeight: 900 }}>
-            Berakhir
-            <input type="date" value={form.endsAt} onChange={event => updateForm('endsAt', event.target.value)} style={{ padding: '0.85rem 1rem', border: '1px solid #d1d5db', borderRadius: '8px', fontWeight: 900 }} />
-          </label>
-        </div>
-
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: '0.8rem', alignItems: 'center' }}>
-          <label style={{ display: 'grid', gap: '0.35rem', color: '#475569', fontWeight: 900 }}>
-            Limit Pemakaian
-            <input type="number" min="0" value={form.usageLimit} onChange={event => updateForm('usageLimit', event.target.value)} placeholder="0 = unlimited" style={{ padding: '0.85rem 1rem', border: '1px solid #d1d5db', borderRadius: '8px', fontWeight: 900 }} />
-          </label>
-          <label style={{ display: 'flex', alignItems: 'center', gap: '0.55rem', padding: '0.85rem 1rem', borderRadius: '8px', border: '1px solid #d1d5db', marginTop: '1.55rem', fontWeight: 900, color: '#475569' }}>
-            <input type="checkbox" checked={form.active} onChange={event => updateForm('active', event.target.checked)} />
-            Aktif
-          </label>
-        </div>
-
-        <div style={{ display: 'flex', gap: '0.75rem', justifyContent: 'flex-end', paddingTop: '0.5rem' }}>
-          {editingId && (
-            <button type="button" onClick={resetForm} style={{ padding: '0.85rem 1rem', borderRadius: '8px', border: '1px solid #e5e7eb', background: '#f8fafc', color: '#111827', cursor: 'pointer', fontWeight: 900 }}>
-              Batal
-            </button>
-          )}
-          <button type="submit" disabled={saving} style={{ padding: '0.85rem 1.4rem', borderRadius: '8px', border: 'none', background: '#f97316', color: 'white', cursor: saving ? 'wait' : 'pointer', fontWeight: 950, boxShadow: '0 8px 18px rgba(249, 115, 22, 0.2)' }}>
-            {saving ? 'Menyimpan...' : editingId ? 'Update Voucher' : 'Tambah Voucher'}
-          </button>
-        </div>
-      </form>
-
-      <section style={{ background: 'white', padding: '2rem', borderRadius: '12px', border: '1px solid #e9ecef', boxShadow: '0 2px 8px rgba(0,0,0,0.02)' }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '1rem', marginBottom: '1rem' }}>
-          <div>
-            <h2 style={{ margin: 0, color: '#111827' }}>Daftar Voucher</h2>
-            <p style={{ margin: '0.25rem 0 0', color: '#64748b', fontSize: '0.9rem' }}>Voucher promo yang tersedia untuk event.</p>
           </div>
-          <button type="button" onClick={loadVouchers} disabled={loading} style={{ padding: '0.65rem 1rem', borderRadius: '8px', border: '1px solid #e5e7eb', background: '#f8fafc', color: '#111827', cursor: loading ? 'wait' : 'pointer', fontWeight: 900 }}>
-            {loading ? 'Loading...' : 'Refresh'}
-          </button>
         </div>
-
-        {loading ? (
-          <div style={{ padding: '3rem', textAlign: 'center', color: '#64748b', border: '1px dashed #cbd5e1', borderRadius: '12px' }}>Memuat voucher...</div>
-        ) : vouchers.length === 0 ? (
-          <div style={{ padding: '3rem', textAlign: 'center', color: '#64748b', border: '1px dashed #cbd5e1', borderRadius: '12px', fontWeight: 800 }}>Belum ada voucher.</div>
-        ) : (
-          <div style={{ display: 'grid', gap: '0.75rem' }}>
-            {vouchers.map(voucher => {
-              const status = voucherStatus(voucher);
-              const discountLabel = voucher.type === 'percent' ? `${voucher.value}%` : formatCurrency(voucher.value);
-              return (
-                <div key={voucher.id} style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) auto', gap: '1rem', alignItems: 'center', padding: '1rem', border: '1px solid #e5e7eb', borderRadius: '12px', background: editingId === voucher.id ? '#fff7ed' : '#fff' }}>
-                  <div style={{ minWidth: 0 }}>
-                    <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', flexWrap: 'wrap', marginBottom: '0.35rem' }}>
-                      <span style={{ color: '#111827', fontWeight: 950, fontSize: '1.1rem' }}>{voucher.code}</span>
-                      <StatusBadge status={status} />
-                      <span style={{ padding: '0.25rem 0.55rem', borderRadius: '999px', background: '#f1f5f9', color: '#475569', fontSize: '0.75rem', fontWeight: 900 }}>{discountLabel}</span>
-                    </div>
-                    <div style={{ color: '#475569', fontWeight: 800 }}>{voucher.name || '-'}</div>
-                    <div style={{ color: '#94a3b8', fontSize: '0.8rem', marginTop: '0.25rem', fontWeight: 750 }}>
-                      Min {formatCurrency(voucher.minAmount || 0)} · Maks {voucher.maxDiscount ? formatCurrency(voucher.maxDiscount) : 'tanpa batas'} · Dipakai {voucher.usedCount || 0}/{voucher.usageLimit || '∞'}
-                    </div>
-                  </div>
-                  <div style={{ display: 'flex', gap: '0.45rem', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
-                    <button type="button" onClick={() => editVoucher(voucher)} style={{ padding: '0.55rem 0.8rem', borderRadius: '8px', border: '1px solid #fed7aa', background: '#fff7ed', color: '#ea580c', cursor: 'pointer', fontWeight: 900 }}>Edit</button>
-                    <button type="button" onClick={() => toggleVoucher(voucher)} style={{ padding: '0.55rem 0.8rem', borderRadius: '8px', border: '1px solid #e5e7eb', background: '#f8fafc', color: '#111827', cursor: 'pointer', fontWeight: 900 }}>{voucher.active ? 'Nonaktifkan' : 'Aktifkan'}</button>
-                    <button type="button" onClick={() => deleteVoucher(voucher)} style={{ padding: '0.55rem 0.8rem', borderRadius: '8px', border: 'none', background: '#fee2e2', color: '#dc2626', cursor: 'pointer', fontWeight: 900 }}>Hapus</button>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        )}
-      </section>
+      </div>
     </div>
   );
 }
+
 
 function AdminUsersTab({ adminToken }) {
   const [users, setUsers] = useState([]);
@@ -4596,12 +5043,67 @@ export default function AdminDashboard() {
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [loginEmail, setLoginEmail] = useState('');
   const [loginPassword, setLoginPassword] = useState('');
+  const [requires2FA, setRequires2FA] = useState(false);
+  const [otpCode, setOtpCode] = useState('');
   const [adminToken, setAdminToken] = useState('');
   const [adminUser, setAdminUser] = useState(null);
   const [error, setError] = useState('');
   const [sessionNotice, setSessionNotice] = useState('');
   
-  const [activeTab, setActiveTab] = useState('overview');
+  useEffect(() => {
+    if (isAuthenticated) return;
+
+    const handleCredentialResponse = async (response) => {
+      try {
+        const res = await backendRequest('/api/auth/google/verify', null, {
+          method: 'POST',
+          body: JSON.stringify({ credential: response.credential })
+        });
+        
+        if (res?.token && res?.user) {
+          localStorage.setItem("urbanmenphoto_admin_token", res.token);
+          localStorage.setItem("urbanmenphoto_admin_user", JSON.stringify(res.user));
+          setAdminToken(res.token);
+          setAdminUser(res.user);
+          setIsAuthenticated(true);
+        }
+      } catch (err) {
+        setError('Login Google gagal: ' + err.message);
+      }
+    };
+
+    const initGoogle = () => {
+      if (!window.google?.accounts?.id) return;
+      window.google.accounts.id.initialize({
+        client_id: import.meta.env.VITE_GOOGLE_CLIENT_ID || '657226319551-2269ospiircnegcjj570kkr75q580m0c.apps.googleusercontent.com',
+        callback: handleCredentialResponse
+      });
+      const btnContainer = document.getElementById('googleSignInBtn');
+      if (btnContainer) {
+        window.google.accounts.id.renderButton(
+          btnContainer,
+          { theme: 'outline', size: 'large', width: 300 }
+        );
+      }
+    };
+
+    if (window.google?.accounts?.id) {
+      initGoogle();
+    } else {
+      const script = document.createElement('script');
+      script.src = 'https://accounts.google.com/gsi/client';
+      script.async = true;
+      script.defer = true;
+      script.onload = initGoogle;
+      document.head.appendChild(script);
+    }
+  }, [isAuthenticated]);
+  
+  const [showNotificationMenu, setShowNotificationMenu] = useState(false);
+  const [activeTab, setActiveTab] = useState(getAdminTabFromPath);
+  const [selectedProjectId, setSelectedProjectId] = useState(null);
+
+  const adminMenuRef = useRef(null);
   
   const [sessions, setSessions] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -4613,6 +5115,26 @@ export default function AdminDashboard() {
   const visibleMenuItems = adminUser?.role === 'staff'
     ? MENU_ITEMS.filter(item => STAFF_ALLOWED_MENUS.has(item.id))
     : MENU_ITEMS;
+  const sidebarGroups = [
+    { label: 'OPERASI', ids: ['overview', 'projects', 'transaction', 'gallery', 'booth_health'] },
+    { label: 'APLIKASI', ids: ['filters', 'frame_photo', 'frame_gif', 'voucher'] },
+    { label: 'AKUN', ids: ['profile', 'subscription', 'wallet', 'payment_key', 'admin_users'] },
+  ].map((group) => ({
+    ...group,
+    items: group.ids.map((id) => visibleMenuItems.find((item) => item.id === id)).filter(Boolean),
+  })).filter((group) => group.items.length > 0);
+  const sidebarLabels = {
+    overview: 'Analitik',
+    booth_health: 'Perangkat',
+    filters: 'Filter',
+    frame_photo: 'Bingkai',
+    frame_gif: 'Bingkai GIF',
+    profile: 'Profil',
+    subscription: 'Langganan',
+    admin_users: 'Tim',
+    payments: 'Pembayaran',
+    payment_key: 'API Payment',
+  };
 
   const clearAdminSession = (message = '') => {
     localStorage.removeItem(ADMIN_TOKEN_KEY);
@@ -4627,8 +5149,21 @@ export default function AdminDashboard() {
 
   useEffect(() => {
     if (!isAuthenticated || visibleMenuItems.some(item => item.id === activeTab)) return;
-    setActiveTab(visibleMenuItems[0]?.id || 'overview');
+    const fallbackTab = visibleMenuItems[0]?.id || 'overview';
+    setActiveTab(fallbackTab);
+    window.history.replaceState({}, '', getAdminPath(fallbackTab));
   }, [isAuthenticated, adminUser?.role, activeTab]);
+
+  useEffect(() => {
+    const handlePopState = () => setActiveTab(getAdminTabFromPath());
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, []);
+
+  const navigateToTab = (tab) => {
+    setActiveTab(tab);
+    window.history.pushState({}, '', getAdminPath(tab));
+  };
 
   useEffect(() => {
     const handleUnauthorized = (event) => {
@@ -4700,33 +5235,65 @@ export default function AdminDashboard() {
 
   const handleLogin = async (e) => {
     e.preventDefault();
-    setError('');
+    if (!loginEmail || !loginPassword) {
+      setError('Email dan Password harus diisi.');
+      return;
+    }
     try {
       const result = await backendRequest('/api/admin/auth/login', null, {
         method: 'POST',
         body: JSON.stringify({
           email: loginEmail,
           password: loginPassword,
-        }),
+        })
       });
-      const token = result.token;
-      const user = { email: loginEmail, role: result.role };
-      localStorage.setItem(ADMIN_TOKEN_KEY, token);
-      localStorage.setItem(ADMIN_USER_KEY, JSON.stringify(user));
-      if (result.expiresAt) {
-        localStorage.setItem(ADMIN_EXPIRES_KEY, result.expiresAt);
-      } else {
-        localStorage.removeItem(ADMIN_EXPIRES_KEY);
+
+      if (result.requires2FA) {
+        setRequires2FA(true);
+        setError('');
+        return;
       }
-      setAdminToken(token);
+
+      const user = { email: loginEmail, role: result.role };
+      
+      localStorage.setItem('urbanmenphoto_admin_token', result.token);
+      localStorage.setItem('urbanmenphoto_admin_user', JSON.stringify(user));
+      setAdminToken(result.token);
       setAdminUser(user);
       setIsAuthenticated(true);
-      setSessionNotice('');
+      setError('');
       setLoginPassword('');
-      fetchSessions(token);
     } catch (err) {
-      setError(err.message);
+      setError(err.message || 'Login gagal.');
       setLoginPassword('');
+    }
+  };
+
+  const handleVerifyOTP = async (e) => {
+    e.preventDefault();
+    if (!otpCode) {
+      setError('Kode OTP harus diisi.');
+      return;
+    }
+    try {
+      const result = await backendRequest('/api/admin/auth/login/verify-otp', null, {
+        method: 'POST',
+        body: JSON.stringify({ email: loginEmail, otp: otpCode })
+      });
+      
+      const user = { email: loginEmail, role: result.role };
+      localStorage.setItem('urbanmenphoto_admin_token', result.token);
+      localStorage.setItem('urbanmenphoto_admin_user', JSON.stringify(user));
+      setAdminToken(result.token);
+      setAdminUser(user);
+      setIsAuthenticated(true);
+      setError('');
+      setLoginPassword('');
+      setOtpCode('');
+      setRequires2FA(false);
+    } catch (err) {
+      setError(err.message || 'OTP tidak valid atau sudah kadaluarsa.');
+      setOtpCode('');
     }
   };
 
@@ -4748,8 +5315,27 @@ export default function AdminDashboard() {
     if (!token) return;
     setLoading(true);
     try {
-      const data = await fetchAllAdminRows('/api/admin/sessions', token);
-      setSessions(Array.isArray(data) ? data : []);
+      const [sessionData, paymentData] = await Promise.all([
+        fetchAllAdminRows('/api/admin/sessions', token),
+        fetchAllAdminRows('/api/admin/payments', token).catch(() => [])
+      ]);
+      
+      let parsedSessions = Array.isArray(sessionData) ? sessionData : [];
+      
+      if (Array.isArray(paymentData) && paymentData.length > 0) {
+        const paymentMap = {};
+        paymentData.forEach(p => {
+          if (!paymentMap[p.sessionId] || p.status === 'paid' || p.status === 'settlement' || p.status === 'success') {
+            paymentMap[p.sessionId] = p;
+          }
+        });
+        parsedSessions = parsedSessions.map(session => ({
+          ...session,
+          payment: paymentMap[session.id] || session.payment
+        }));
+      }
+
+      setSessions(parsedSessions);
     } catch (err) {
       console.error('Error fetching sessions:', err);
     } finally {
@@ -4797,39 +5383,79 @@ export default function AdminDashboard() {
   if (!isAuthenticated) {
     return (
       <div style={{ display: 'grid', placeItems: 'center', minHeight: '100vh', background: '#f8f9fa' }}>
-        <form onSubmit={handleLogin} style={{ background: 'white', padding: '3rem', borderRadius: '16px', border: '1px solid #e9ecef', textAlign: 'center', maxWidth: '400px', width: '90%', boxShadow: '0 10px 25px rgba(0,0,0,0.05)' }}>
+        <form onSubmit={requires2FA ? handleVerifyOTP : handleLogin} style={{ background: 'white', padding: '3rem', borderRadius: '16px', border: '1px solid #e9ecef', textAlign: 'center', maxWidth: '400px', width: '90%', boxShadow: '0 10px 25px rgba(0,0,0,0.05)' }}>
           <div style={{ fontSize: '3rem', marginBottom: '1rem' }}>🔒</div>
-          <h2 style={{ marginBottom: '0.5rem', color: '#111' }}>Admin Access</h2>
-          <p style={{ color: '#6c757d', marginBottom: '2rem', fontSize: '0.9rem' }}>Login dengan akun admin backend.</p>
+          <h2 style={{ marginBottom: '0.5rem', color: '#111' }}>{requires2FA ? 'Verifikasi 2FA' : 'Admin Access'}</h2>
+          <p style={{ color: '#6c757d', marginBottom: '2rem', fontSize: '0.9rem' }}>
+            {requires2FA ? 'Cek email Anda untuk kode verifikasi 6 digit.' : 'Login dengan akun admin backend.'}
+          </p>
+          
           {sessionNotice && <div style={{ marginBottom: '1rem', padding: '0.75rem 0.9rem', borderRadius: '8px', background: '#fff7ed', color: '#c2410c', fontWeight: '800', fontSize: '0.85rem', textAlign: 'left' }}>{sessionNotice}</div>}
           
-          <input 
-            type="email" 
-            value={loginEmail}
-            onChange={(e) => setLoginEmail(e.target.value)}
-            placeholder="admin@urbanmenphoto.com"
-            style={{ 
-              width: '100%', padding: '0.9rem 1rem', fontSize: '1rem',
-              borderRadius: '8px', border: '2px solid #e9ecef', marginBottom: '1rem' 
-            }}
-            autoFocus
-          />
-          <input 
-            type="password" 
-            value={loginPassword}
-            onChange={(e) => setLoginPassword(e.target.value)}
-            placeholder="Password"
-            style={{ 
-              width: '100%', padding: '0.9rem 1rem', fontSize: '1rem',
-              borderRadius: '8px', border: '2px solid #e9ecef', marginBottom: '1rem' 
-            }}
-          />
+          {!requires2FA ? (
+            <>
+              <input 
+                type="email" 
+                value={loginEmail}
+                onChange={(e) => setLoginEmail(e.target.value)}
+                placeholder="admin@urbanmenphoto.com"
+                style={{ 
+                  width: '100%', padding: '0.9rem 1rem', fontSize: '1rem',
+                  borderRadius: '8px', border: '2px solid #e9ecef', marginBottom: '1rem' 
+                }}
+                autoFocus
+              />
+              <input 
+                type="password" 
+                value={loginPassword}
+                onChange={(e) => setLoginPassword(e.target.value)}
+                placeholder="Password"
+                style={{ 
+                  width: '100%', padding: '0.9rem 1rem', fontSize: '1rem',
+                  borderRadius: '8px', border: '2px solid #e9ecef', marginBottom: '1rem' 
+                }}
+              />
+            </>
+          ) : (
+            <>
+              <input 
+                type="text" 
+                value={otpCode}
+                onChange={(e) => setOtpCode(e.target.value)}
+                placeholder="Kode 6 Digit"
+                maxLength={6}
+                style={{ 
+                  width: '100%', padding: '0.9rem 1rem', fontSize: '1.25rem', letterSpacing: '0.2rem', textAlign: 'center',
+                  borderRadius: '8px', border: '2px solid #e9ecef', marginBottom: '1rem' 
+                }}
+                autoFocus
+              />
+            </>
+          )}
           
           {error && <div style={{ color: '#ef4444', marginBottom: '1rem', fontSize: '0.9rem' }}>{error}</div>}
           
           <button type="submit" style={{ width: '100%', padding: '1rem', background: '#f97316', color: 'white', borderRadius: '8px', fontWeight: 'bold', fontSize: '1.1rem', cursor: 'pointer', border: 'none' }}>
-            Masuk
+            {requires2FA ? 'Verifikasi OTP' : 'Masuk'}
           </button>
+
+          {!requires2FA && (
+            <>
+              <div style={{ margin: '1.5rem 0', display: 'flex', alignItems: 'center', color: '#adb5bd', fontSize: '0.9rem' }}>
+                 <hr style={{ flex: 1, border: 'none', borderTop: '1px solid #e9ecef' }} /> 
+                 <span style={{ padding: '0 1rem' }}>Atau masuk dengan</span> 
+                 <hr style={{ flex: 1, border: 'none', borderTop: '1px solid #e9ecef' }} />
+              </div>
+              
+              <div id="googleSignInBtn" style={{ display: 'flex', justifyContent: 'center' }}></div>
+            </>
+          )}
+
+          {requires2FA && (
+            <button type="button" onClick={() => { setRequires2FA(false); setOtpCode(''); }} style={{ marginTop: '1rem', background: 'transparent', border: 'none', color: '#6b7280', fontSize: '0.9rem', cursor: 'pointer' }}>
+              Batal
+            </button>
+          )}
         </form>
       </div>
     );
@@ -4839,30 +5465,41 @@ export default function AdminDashboard() {
   const renderContent = () => {
     switch (activeTab) {
       case 'overview':
-        return (
-          <div>
-            <h2 style={{ marginBottom: '1.5rem', color: '#111' }}>Dashboard Overview</h2>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(250px, 1fr))', gap: '1.5rem' }}>
-              <div style={{ background: 'white', padding: '2rem', borderRadius: '12px', border: '1px solid #e9ecef', boxShadow: '0 2px 8px rgba(0,0,0,0.02)' }}>
-                <div style={{ color: '#6c757d', marginBottom: '0.5rem', fontWeight: 'bold', fontSize: '0.9rem', textTransform: 'uppercase' }}>Total Sessions</div>
-                <div style={{ fontSize: '3rem', fontWeight: 'bold', color: '#10B981' }}>{sessions.length}</div>
-              </div>
-              <div style={{ background: 'white', padding: '2rem', borderRadius: '12px', border: '1px solid #e9ecef', boxShadow: '0 2px 8px rgba(0,0,0,0.02)' }}>
-                <div style={{ color: '#6c757d', marginBottom: '0.5rem', fontWeight: 'bold', fontSize: '0.9rem', textTransform: 'uppercase' }}>Photos Taken (Est.)</div>
-                <div style={{ fontSize: '3rem', fontWeight: 'bold', color: '#3b82f6' }}>{sessions.reduce((acc, s) => acc + (s.images ? s.images.length : 0), 0)}</div>
-              </div>
-            </div>
-          </div>
-        );
+        return <AdminOverview sessions={sessions} />;
+
+      case 'wallet':
+        return <WalletTab />;
+
+      case 'profile':
+        return <ProfileTab adminUser={adminUser} />;
+
+      case 'subscription':
+        return <SubscriptionTab adminToken={adminToken} />;
+
+      case 'frame_gif':
+        return <FrameGifManager adminToken={adminToken} />;
+
+      case 'payment_key':
+        return <PaymentKeyTab adminToken={adminToken} />;
+
+      case 'projects':
+        return <ProjectManager 
+          adminToken={adminToken} 
+          onEditProject={(id) => { setSelectedProjectId(id); setActiveTab('kiosk'); }} 
+          onStartKiosk={(id) => {
+            setSelectedProjectId(id);
+            setActiveTab('kiosk');
+          }}
+        />;
       
       case 'kiosk':
-        return <KioskSettingsTab />;
+        return <KioskSettingsTab projectId={selectedProjectId} adminToken={adminToken} onBack={() => { setSelectedProjectId(null); setActiveTab('projects'); }} />;
 
       case 'booth_health':
         return <BoothHealthTab adminToken={adminToken} />;
 
-      case 'monitoring':
-        return <MonitoringTab adminToken={adminToken} />;
+      case 'filters':
+        return <FilterManagementTab adminToken={adminToken} />;
 
       case 'recovery':
         return <RecoveryTab />;
@@ -4890,7 +5527,9 @@ export default function AdminDashboard() {
               { key: 'id', label: 'Payment ID', render: row => <span style={{ fontFamily: 'monospace' }}>{String(row.id).slice(0, 18)}...</span> },
               { key: 'sessionId', label: 'Session ID', render: row => <span style={{ fontFamily: 'monospace' }}>{String(row.sessionId).slice(0, 18)}...</span> },
               { key: 'provider', label: 'Provider' },
-              { key: 'amount', label: 'Amount', render: row => formatCurrency(row.amount) },
+              { key: 'originalAmount', label: 'Original', render: row => formatCurrency(row.originalAmount || row.amount) },
+              { key: 'discountAmount', label: 'Discount', render: row => <span style={{ color: '#059669', fontWeight: 600 }}>{row.discountAmount ? `- ${formatCurrency(row.discountAmount)}` : '-'}</span> },
+              { key: 'amount', label: 'Final', render: row => <span style={{ fontWeight: 700 }}>{formatCurrency(row.amount)}</span> },
               { key: 'status', label: 'Status', render: row => <StatusBadge status={row.status} /> },
               { key: 'createdAt', label: 'Created', render: row => formatDateTime(row.createdAt) },
             ]}
@@ -4916,7 +5555,7 @@ export default function AdminDashboard() {
         );
         
       case 'frame_photo':
-        return <FramePhotoComposerTab adminToken={adminToken} />;
+        return <FrameManager adminToken={adminToken} />;
 
       case 'voucher':
         return <VoucherSettingsTab adminToken={adminToken} />;
@@ -5047,67 +5686,58 @@ export default function AdminDashboard() {
   };
 
   return (
-    <div style={{ display: 'flex', height: '100vh', backgroundColor: '#f8f9fa', fontFamily: "'Inter', sans-serif" }}>
+    <div className="admin-layout flex min-h-screen bg-[#f1f1f1] font-sans text-[#25232a]">
       {/* Sidebar Navigation */}
-      <aside style={{ width: '292px', backgroundColor: '#f4f5f8', borderRight: '1px solid #e5e7eb', display: 'flex', flexDirection: 'column', flexShrink: 0 }}>
-        <div style={{ padding: '2.65rem 1.75rem 2.35rem', borderBottom: '1px solid #e5e7eb' }}>
-          <h1 style={{ margin: 0, fontSize: '1.52rem', fontWeight: 950, letterSpacing: '0.055em', color: '#111', lineHeight: 1 }}>POTOBOX<span style={{ color: '#10b981' }}>.</span></h1>
-          <div style={{ fontSize: '1rem', color: '#9aa1aa', marginTop: '0.85rem', textTransform: 'uppercase', letterSpacing: '0.105em', fontWeight: 500 }}>Admin Panel v1.0</div>
+      <aside className="admin-sidebar flex w-48 shrink-0 flex-col border-r border-[#e7e7e9] bg-[rgba(250,250,250,0.86)] shadow-[2px_0_8px_rgba(25,20,35,0.05)]">
+        <div className="px-4 pb-2 pt-5">
+          <h1 className="m-0 text-[21px] font-black tracking-[-0.055em] text-[#31313a]">POTOBOX<span className="text-[#f97316]">.</span></h1>
+          <div className="mt-0.5 text-[8px] font-semibold uppercase tracking-[0.16em] text-[#686975]">Photo Booth</div>
+        </div>
+        <div className="flex items-center justify-between px-4 pb-3 pt-2 text-[10px] font-medium text-[#9b9ba5]">
+          <button type="button" className="inline-flex items-center gap-1 rounded px-0.5 py-1 transition hover:text-[#f97316]" aria-label="Pilih bahasa">ID <span className="text-xs">⌄</span></button>
+          <button type="button" className="grid size-6 place-items-center rounded text-base leading-none transition hover:bg-[#fff0e7] hover:text-[#f97316]" aria-label="Sembunyikan sidebar">⇥</button>
         </div>
         
-        <nav style={{ padding: '1.6rem 1.1rem 1.2rem', flex: 1, overflowY: 'auto' }}>
-          {visibleMenuItems.map(item => {
-            const isActive = activeTab === item.id;
-            return (
-              <button
-                key={item.id}
-                onClick={() => setActiveTab(item.id)}
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: '1.35rem',
-                  width: '100%',
-                  minHeight: '54px',
-                  padding: '0.85rem 1.05rem',
-                  border: 'none',
-                  background: isActive ? '#ff6f16' : 'transparent',
-                  color: isActive ? '#fff' : '#555c66',
-                  fontSize: '1.05rem',
-                  fontWeight: isActive ? 850 : 650,
-                  textAlign: 'left',
-                  cursor: 'pointer',
-                  borderRadius: '8px',
-                  marginBottom: '0.43rem',
-                  transition: 'background 0.2s, color 0.2s, transform 0.2s',
-                }}
-              >
-                <div style={{ opacity: isActive ? 1 : 0.72, display: 'flex', alignItems: 'center', justifyContent: 'center', width: '26px', color: 'inherit' }}>
-                  {item.icon}
-                </div>
-                <span style={{ lineHeight: 1 }}>{item.label}</span>
-              </button>
-            )
-          })}
+        <nav className="flex-1 overflow-y-auto px-4 py-7">
+          {sidebarGroups.map((group) => (
+            <section className="mb-5" key={group.label}>
+              <h2 className="mb-3 text-[11px] font-medium uppercase tracking-normal text-[#686975]">{group.label}</h2>
+              <div className="space-y-1.5">
+                {group.items.map((item) => {
+                  const isActive = activeTab === item.id;
+                  return (
+                    <button key={item.id} onClick={() => navigateToTab(item.id)} className={`flex min-h-8 w-full items-center gap-3 rounded px-0 py-1 text-left text-[15px] transition-colors ${isActive ? 'font-medium text-[#f97316]' : 'font-normal text-[#3f4655] hover:text-[#f97316]'}`}>
+                      <span className="admin-sidebar-icon grid size-[16px] shrink-0 place-items-center">{item.icon}</span>
+                      <span className="leading-5">{sidebarLabels[item.id] || item.label}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            </section>
+          ))}
         </nav>
 
-        <div style={{ padding: '1.6rem 1.75rem 1.9rem', borderTop: '1px solid #e5e7eb' }}>
+        <div className="border-t border-[#ededee] px-3 py-4">
           {adminUser && (
-            <div style={{ marginBottom: '1.65rem', lineHeight: 1.25 }}>
-              <div style={{ fontSize: '0.92rem', color: '#4b5563', fontWeight: 900, overflowWrap: 'anywhere' }}>{adminUser.email}</div>
-              <div style={{ color: '#9aa1aa', textTransform: 'uppercase', fontSize: '0.86rem', letterSpacing: '0.045em', marginTop: '0.3rem', fontWeight: 600 }}>{adminUser.role}</div>
+            <div className="mb-3 flex items-center gap-2.5 px-1">
+              <div className="grid size-8 shrink-0 place-items-center rounded-full bg-[#fff0e7] text-xs font-bold text-[#f97316]">{adminUser.email.slice(0, 1).toUpperCase()}</div>
+              <div className="min-w-0 leading-tight">
+                <div className="truncate text-xs font-medium text-[#363744]">{adminUser.email}</div>
+                <div className="mt-0.5 text-[10px] text-[#81818a]">{adminUser.role}</div>
+              </div>
             </div>
           )}
           <button 
             onClick={handleLogout}
-            style={{ width: '100%', minHeight: '52px', padding: '0.9rem', background: 'transparent', color: '#ef4444', border: '1px solid #ff6b6b', borderRadius: '10px', cursor: 'pointer', fontSize: '1rem', fontWeight: 900 }}
+            className="flex min-h-8 w-full items-center gap-2 rounded px-1 py-1 text-left text-sm text-[#3f4655] transition-colors hover:text-[#f97316]"
           >
-            Logout
+            <span className="text-base">↪</span> Keluar
           </button>
         </div>
       </aside>
 
       {/* Main Content Area */}
-      <main style={{ flex: 1, padding: '3rem', overflowY: 'auto' }}>
+      <main className="min-w-0 flex-1 overflow-y-auto p-5 sm:p-7">
         {renderContent()}
       </main>
       {sessionDetail && (

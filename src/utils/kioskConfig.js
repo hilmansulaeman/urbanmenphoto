@@ -1,6 +1,8 @@
+import { getBackendApiUrl } from './backendApi.js';
+
 const STORAGE_KEY = 'potobox_kiosk_settings';
 
-const defaultSettings = {
+export const defaultSettings = {
   boothId: '',
   kioskName: 'Urbanmenphoto Booth',
   eventName: '',
@@ -18,7 +20,7 @@ const defaultSettings = {
   cameraProfiles: [],
   idleTimeout: 60, // in seconds
   autoPrintEnabled: false,
-  printMode: 'dialog',
+  printMode: 'hardware_agent',
   printDelaySeconds: 1.5,
   printerName: '',
   printNote: ''
@@ -49,7 +51,7 @@ const createLegacyCameraProfiles = (settings = {}) => ([
   },
 ]);
 
-const normalizeCameraProfiles = (settings = {}) => {
+export const normalizeCameraProfiles = (settings = {}) => {
   const source = Array.isArray(settings.cameraProfiles) && settings.cameraProfiles.length
     ? settings.cameraProfiles
     : createLegacyCameraProfiles(settings);
@@ -61,11 +63,12 @@ const normalizeCameraProfiles = (settings = {}) => {
       name: profile.name || (index === 0 ? 'Cam 1 (Normal Angle)' : 'Cam 2 (Wide Angle)'),
       deviceId: profile.deviceId || '',
       deviceLabel: profile.deviceLabel || '',
-      captureMode: profile.captureMode === 'dslr' ? 'dslr' : 'webcam',
-      tetherPort: profile.tetherPort || '',
+      // Allow dynamic captureMode (webcam or dslr). Defaults to dslr for compatibility.
+      captureMode: profile.captureMode || 'dslr',
+      tetherPort: (profile.captureMode || 'dslr') === 'dslr' ? (profile.tetherPort || '') : '',
       facingMode: profile.facingMode || (index === 0 ? settings.defaultCamera || 'user' : 'environment'),
       mirror: typeof profile.mirror === 'boolean' ? profile.mirror : index === 0 ? settings.mirrorCamera !== false : false,
-      enabled: typeof profile.enabled === 'boolean' ? profile.enabled : index === 0,
+      enabled: true, // Forcibly enabled both cameras for now
     };
   });
 };
@@ -98,6 +101,7 @@ export function saveKioskSettings(settings) {
     localStorage.setItem(STORAGE_KEY, JSON.stringify({
       ...settings,
       cameraProfiles,
+      printMode: 'hardware_agent',
       // Preserve these legacy fields for existing kiosk configurations.
       cameraDeviceId: firstCamera.deviceId,
       cameraDeviceLabel: firstCamera.deviceLabel,
@@ -108,6 +112,7 @@ export function saveKioskSettings(settings) {
       publicGalleryBaseUrl: trimTrailingSlash(settings.publicGalleryBaseUrl),
       backendApiUrl: trimTrailingSlash(settings.backendApiUrl),
     }));
+    saveKioskSettingsToServer(settings);
     return true;
   } catch (e) {
     console.error('Failed to save kiosk settings', e);
@@ -125,4 +130,55 @@ export function getPublicGalleryBaseUrl(settings = getKioskSettings()) {
 export function getConfiguredBackendApiUrl(fallback = '') {
   const configured = trimTrailingSlash(getKioskSettings().backendApiUrl);
   return configured || trimTrailingSlash(fallback);
+}
+
+
+export function getActiveProjectId() {
+  if (typeof window === 'undefined') return null;
+  return localStorage.getItem('urbanmenphoto_kiosk_project_id') || null;
+}
+
+export function setActiveProjectId(id) {
+  if (typeof window === 'undefined') return;
+  if (id) {
+    localStorage.setItem('urbanmenphoto_kiosk_project_id', id);
+  } else {
+    localStorage.removeItem('urbanmenphoto_kiosk_project_id');
+  }
+}
+
+export async function syncKioskSettings() {
+  try {
+    const projectId = getActiveProjectId();
+    const url = projectId ? `${getBackendApiUrl()}/api/settings?projectId=${projectId}` : `${getBackendApiUrl()}/api/settings`;
+    const res = await fetch(url);
+    if (res.ok) {
+      const text = await res.text();
+      try {
+        const json = JSON.parse(text);
+        if (json && json.data && Object.keys(json.data).length > 0) {
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(json.data));
+        }
+      } catch (e) {
+        console.warn('API returned invalid JSON:', text.substring(0, 100));
+      }
+    }
+  } catch (err) {
+    console.error('Failed to sync settings from server', err);
+  }
+}
+
+export async function saveKioskSettingsToServer(settings) {
+  try {
+    const projectId = getActiveProjectId();
+    const url = projectId ? `${getBackendApiUrl()}/api/settings?projectId=${projectId}` : `${getBackendApiUrl()}/api/settings`;
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(settings)
+    });
+    if (!res.ok) throw new Error('Failed to save to server');
+  } catch (err) {
+    console.error(err);
+  }
 }

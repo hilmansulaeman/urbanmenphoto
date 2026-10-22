@@ -9,6 +9,15 @@ type StoredImage struct {
 	Size     int64  `json:"size"`
 }
 
+type Project struct {
+	ID        string         `json:"id"`
+	Name      string         `json:"name"`
+	Cover     string         `json:"coverImage,omitempty"`
+	Settings  map[string]any `json:"settings"`
+	CreatedAt time.Time      `json:"createdAt"`
+	UpdatedAt time.Time      `json:"updatedAt"`
+}
+
 type Session struct {
 	ID                string       `json:"id"`
 	ShortCode         string       `json:"shortCode"`
@@ -66,11 +75,14 @@ type Payment struct {
 	Currency    string    `json:"currency"`
 	Status      string    `json:"status"`
 	ProviderRef *string   `json:"providerRef,omitempty"`
-	SnapToken   *string   `json:"snapToken,omitempty"`
-	CheckoutURL *string   `json:"checkoutUrl,omitempty"`
-	QRString    *string   `json:"qrString,omitempty"`
-	QRImageData *string   `json:"qrImageData,omitempty"`
-	CreatedAt   time.Time `json:"createdAt"`
+	SnapToken      *string   `json:"snapToken,omitempty"`
+	CheckoutURL    *string   `json:"checkoutUrl,omitempty"`
+	QRString       *string   `json:"qrString,omitempty"`
+	QRImageData    *string   `json:"qrImageData,omitempty"`
+	VoucherID      *string   `json:"voucherId,omitempty"`
+	OriginalAmount int64     `json:"originalAmount"`
+	DiscountAmount int64     `json:"discountAmount"`
+	CreatedAt      time.Time `json:"createdAt"`
 	UpdatedAt   time.Time `json:"updatedAt"`
 }
 
@@ -118,6 +130,16 @@ type Frame struct {
 	UpdatedAt    time.Time `json:"updatedAt"`
 }
 
+type Filter struct {
+	ID        string    `json:"id"`
+	Name      string    `json:"name"`
+	Category  string    `json:"category"`
+	CSS       string    `json:"css"`
+	Active    bool      `json:"active"`
+	CreatedAt time.Time `json:"createdAt"`
+	UpdatedAt time.Time `json:"updatedAt"`
+}
+
 type Voucher struct {
 	ID          string     `json:"id"`
 	Code        string     `json:"code"`
@@ -129,6 +151,7 @@ type Voucher struct {
 	UsageLimit  int        `json:"usageLimit"`
 	UsedCount   int        `json:"usedCount"`
 	Active      bool       `json:"active"`
+	CreatedBy   *string    `json:"createdBy,omitempty"`
 	StartsAt    *time.Time `json:"startsAt,omitempty"`
 	EndsAt      *time.Time `json:"endsAt,omitempty"`
 	CreatedAt   time.Time  `json:"createdAt"`
@@ -147,19 +170,32 @@ type Stats struct {
 
 type AdminUser struct {
 	ID           string    `json:"id"`
-	Email        string    `json:"email"`
-	PasswordHash string    `json:"-"`
-	Role         string    `json:"role"`
-	CreatedAt    time.Time `json:"createdAt"`
-	UpdatedAt    time.Time `json:"updatedAt"`
+	Email            string    `json:"email"`
+	PasswordHash     string    `json:"passwordHash"`
+	Role             string    `json:"role"`
+	GoogleID         *string   `json:"googleId,omitempty"`
+	AvatarURL        *string   `json:"avatarUrl,omitempty"`
+	TwoFactorEnabled bool      `json:"twoFactorEnabled"`
+	CreatedAt        time.Time `json:"createdAt"`
+	UpdatedAt        time.Time `json:"updatedAt"`
 }
 
 type AdminUserView struct {
-	ID        string    `json:"id"`
+	ID               string    `json:"id"`
+	Email            string    `json:"email"`
+	Role             string    `json:"role"`
+	GoogleID         *string   `json:"googleId,omitempty"`
+	AvatarURL        *string   `json:"avatarUrl,omitempty"`
+	TwoFactorEnabled bool      `json:"twoFactorEnabled"`
+	CreatedAt        time.Time `json:"createdAt"`
+	UpdatedAt        time.Time `json:"updatedAt"`
+}
+
+type LoginOTP struct {
 	Email     string    `json:"email"`
-	Role      string    `json:"role"`
+	OTP       string    `json:"otp"`
+	ExpiresAt time.Time `json:"expiresAt"`
 	CreatedAt time.Time `json:"createdAt"`
-	UpdatedAt time.Time `json:"updatedAt"`
 }
 
 type AdminToken struct {
@@ -196,9 +232,15 @@ type AdminLoginRequest struct {
 
 type AdminLoginResponse struct {
 	Authenticated bool   `json:"authenticated"`
+	Requires2FA   bool   `json:"requires2FA,omitempty"`
 	Token         string `json:"token,omitempty"`
 	ExpiresAt     string `json:"expiresAt,omitempty"`
 	Role          string `json:"role,omitempty"`
+}
+
+type AdminVerifyOTPRequest struct {
+	Email string `json:"email"`
+	OTP   string `json:"otp"`
 }
 
 type CreateAdminUserRequest struct {
@@ -252,10 +294,11 @@ type PatchSessionRequest struct {
 }
 
 type CreatePaymentRequest struct {
-	SessionID string `json:"sessionId"`
-	Provider  string `json:"provider"`
-	Amount    int64  `json:"amount"`
-	Currency  string `json:"currency"`
+	SessionID   string `json:"sessionId"`
+	Provider    string `json:"provider"`
+	Amount      int64  `json:"amount"`
+	Currency    string `json:"currency"`
+	VoucherCode string `json:"voucherCode,omitempty"`
 }
 
 type PaymentWebhookRequest struct {
@@ -330,4 +373,48 @@ type PaginatedResponse struct {
 	Page       int `json:"page"`
 	PageSize   int `json:"pageSize"`
 	TotalPages int `json:"totalPages"`
+}
+
+type WalletSettings struct {
+	AccountName    string `json:"accountName"`
+	AccountNumber  string `json:"accountNumber"`
+	BankName       string `json:"bankName"`
+	WithdrawalPref string `json:"withdrawalPref"`
+}
+
+type Withdrawal struct {
+	ID        string    `json:"id"`
+	Amount    int64     `json:"amount"`
+	Fee       int64     `json:"fee"`
+	Status    string    `json:"status"` // pending, completed, failed
+	Reference string    `json:"reference"`
+	CreatedAt time.Time `json:"createdAt"`
+}
+
+type Subscription struct {
+	ID           string    `json:"id"`
+	Name         string    `json:"name"`
+	Price        int64     `json:"price"`
+	DurationDays int       `json:"durationDays"`
+	Features     []string  `json:"features"`
+	Active       bool      `json:"active"`
+	CreatedAt    time.Time `json:"createdAt"`
+	UpdatedAt    time.Time `json:"updatedAt"`
+}
+
+type PaymentKey struct {
+	MidtransClientKey string `json:"midtransClientKey"`
+	MidtransServerKey string `json:"midtransServerKey"`
+	XenditAPIKey      string `json:"xenditApiKey"`
+	ActiveGateway     string `json:"activeGateway"`
+}
+
+type FrameGif struct {
+	ID           string    `json:"id"`
+	Name         string    `json:"name"`
+	ImageURL     string    `json:"imageUrl"`
+	SlotJSON     string    `json:"slotJson"`
+	Active       bool      `json:"active"`
+	CreatedAt    time.Time `json:"createdAt"`
+	UpdatedAt    time.Time `json:"updatedAt"`
 }

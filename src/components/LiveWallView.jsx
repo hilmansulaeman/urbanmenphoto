@@ -4,6 +4,7 @@ import { QRCodeSVG } from 'qrcode.react';
 import { backendRequest, reportMonitoringError } from '../utils/backendApi.js';
 import { getKioskSettings, getPublicGalleryBaseUrl } from '../utils/kioskConfig.js';
 import { saveRecoverySession } from '../utils/sessionRecovery.js';
+import { queueHardwarePrint } from '../utils/dslr.js';
 
 const DUMMY_COMMENTS = [
   "Wah, seru banget eventnya! 🔥",
@@ -149,9 +150,11 @@ export default function LiveWallView({ orderDetails, upsellDetails, capturedPhot
     });
   };
 
-  const safePrint = (trigger = 'manual') => {
+  const safePrint = async (trigger = 'manual', imageUrl = '') => {
     try {
-      window.print();
+      if (!kioskSettings.printerName) throw new Error('Pilih printer HiTi terlebih dahulu di Admin → Kiosk.');
+      if (!imageUrl) throw new Error('Gambar hasil foto belum siap untuk dicetak.');
+      await queueHardwarePrint({ printerName: kioskSettings.printerName, imageUrl, copies: 1 });
     } catch (err) {
       reportMonitoringError({
         category: 'print',
@@ -404,7 +407,7 @@ export default function LiveWallView({ orderDetails, upsellDetails, capturedPhot
           if (kioskSettings.autoPrintEnabled) {
             const printDelay = Math.max(0, Number(kioskSettings.printDelaySeconds || 0)) * 1000;
             setTimeout(() => {
-              safePrint('auto');
+              safePrint('auto', primaryPrintImage);
             }, printDelay);
           }
 

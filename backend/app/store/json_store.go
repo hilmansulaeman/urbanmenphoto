@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"urbanmenphoto/backend/app/models"
 )
@@ -22,11 +23,20 @@ type database struct {
 	Payments      []models.Payment      `json:"payments"`
 	PaymentLogs   []models.PaymentLog   `json:"paymentLogs"`
 	Frames        []models.Frame        `json:"frames"`
+	Filters       []models.Filter       `json:"filters"`
 	Vouchers      []models.Voucher      `json:"vouchers"`
 	AdminUsers    []models.AdminUser    `json:"adminUsers"`
 	AdminTokens   []models.AdminToken   `json:"adminTokens"`
 	AuditLogs     []models.AuditLog     `json:"auditLogs"`
-	LoginAttempts []models.LoginAttempt `json:"loginAttempts"`
+	LoginAttempts  []models.LoginAttempt `json:"loginAttempts"`
+	LoginOTPs      []models.LoginOTP     `json:"loginOtps"`
+	WalletSettings models.WalletSettings `json:"walletSettings"`
+	Withdrawals    []models.Withdrawal   `json:"withdrawals"`
+	DeviceSettings map[string]any `json:"deviceSettings"`
+	Projects       []models.Project      `json:"projects"`
+	Subscriptions  []models.Subscription `json:"subscriptions"`
+	FramesGif      []models.FrameGif     `json:"framesGif"`
+	PaymentKey     models.PaymentKey     `json:"paymentKey"`
 }
 
 func NewJSONStore(dataDir string) (*JSONStore, error) {
@@ -42,11 +52,20 @@ func NewJSONStore(dataDir string) (*JSONStore, error) {
 			Payments:      []models.Payment{},
 			PaymentLogs:   []models.PaymentLog{},
 			Frames:        []models.Frame{},
+			Filters:       []models.Filter{},
 			Vouchers:      []models.Voucher{},
 			AdminUsers:    []models.AdminUser{},
 			AdminTokens:   []models.AdminToken{},
 			AuditLogs:     []models.AuditLog{},
 			LoginAttempts: []models.LoginAttempt{},
+			LoginOTPs:     []models.LoginOTP{},
+			WalletSettings: models.WalletSettings{},
+			Withdrawals:    []models.Withdrawal{},
+			DeviceSettings: map[string]any{},
+			Projects:       []models.Project{},
+			Subscriptions:  []models.Subscription{},
+			FramesGif:      []models.FrameGif{},
+			PaymentKey:     models.PaymentKey{},
 		},
 	}
 
@@ -77,6 +96,10 @@ func (s *JSONStore) persist() error {
 		return err
 	}
 	return os.WriteFile(s.path, file, 0644)
+}
+
+func (s *JSONStore) save() error {
+	return s.persist()
 }
 
 func (s *JSONStore) ListSessions() []models.Session {
@@ -295,13 +318,49 @@ func (s *JSONStore) DeleteFrame(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	for index, frame := range s.data.Frames {
+	for i, frame := range s.data.Frames {
 		if frame.ID == id {
-			s.data.Frames = append(s.data.Frames[:index], s.data.Frames[index+1:]...)
+			s.data.Frames = append(s.data.Frames[:i], s.data.Frames[i+1:]...)
 			return s.persist()
 		}
 	}
-	return os.ErrNotExist
+	return nil
+}
+
+func (s *JSONStore) ListFilters() []models.Filter {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	filters := make([]models.Filter, len(s.data.Filters))
+	copy(filters, s.data.Filters)
+	return filters
+}
+
+func (s *JSONStore) UpsertFilter(filter models.Filter) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for i, f := range s.data.Filters {
+		if f.ID == filter.ID {
+			s.data.Filters[i] = filter
+			return s.persist()
+		}
+	}
+
+	s.data.Filters = append(s.data.Filters, filter)
+	return s.persist()
+}
+
+func (s *JSONStore) DeleteFilter(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for i, f := range s.data.Filters {
+		if f.ID == id {
+			s.data.Filters = append(s.data.Filters[:i], s.data.Filters[i+1:]...)
+			return s.persist()
+		}
+	}
+	return nil
 }
 
 func (s *JSONStore) ListVouchers() []models.Voucher {
@@ -506,4 +565,258 @@ func (s *JSONStore) UpsertLoginAttempt(attempt models.LoginAttempt) error {
 	}
 	s.data.LoginAttempts = append(s.data.LoginAttempts, attempt)
 	return s.persist()
+}
+
+// Wallet Methods
+
+func (s *JSONStore) GetWalletSettings() models.WalletSettings {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.data.WalletSettings
+}
+
+func (s *JSONStore) SaveWalletSettings(settings models.WalletSettings) error {
+	s.mu.Lock()
+	s.data.WalletSettings = settings
+	s.mu.Unlock()
+	return s.persist()
+}
+
+func (s *JSONStore) ListWithdrawals() []models.Withdrawal {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cpy := make([]models.Withdrawal, len(s.data.Withdrawals))
+	copy(cpy, s.data.Withdrawals)
+	return cpy
+}
+
+func (s *JSONStore) InsertWithdrawal(withdrawal models.Withdrawal) error {
+	s.mu.Lock()
+	s.data.Withdrawals = append(s.data.Withdrawals, withdrawal)
+	s.mu.Unlock()
+	return s.persist()
+}
+
+func (s *JSONStore) ToggleTwoFactor(userID string, enabled bool) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for index, item := range s.data.AdminUsers {
+		if item.ID == userID {
+			s.data.AdminUsers[index].TwoFactorEnabled = enabled
+			return s.persist()
+		}
+	}
+	return os.ErrNotExist
+}
+
+func (s *JSONStore) UpsertLoginOTP(otp models.LoginOTP) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for index, item := range s.data.LoginOTPs {
+		if item.Email == otp.Email {
+			s.data.LoginOTPs[index] = otp
+			return s.persist()
+		}
+	}
+	s.data.LoginOTPs = append(s.data.LoginOTPs, otp)
+	return s.persist()
+}
+
+func (s *JSONStore) VerifyLoginOTP(email, otp string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for _, item := range s.data.LoginOTPs {
+		if item.Email == email && item.OTP == otp {
+			return time.Now().Before(item.ExpiresAt)
+		}
+	}
+	return false
+}
+
+func (s *JSONStore) DeleteLoginOTP(email string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for index, item := range s.data.LoginOTPs {
+		if item.Email == email {
+			s.data.LoginOTPs = append(s.data.LoginOTPs[:index], s.data.LoginOTPs[index+1:]...)
+			return s.persist()
+		}
+	}
+	return nil
+}
+
+func (s *JSONStore) GetDeviceSettings() map[string]any {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.data.DeviceSettings == nil {
+		s.data.DeviceSettings = make(map[string]any)
+	}
+	// copy map
+	cp := make(map[string]any)
+	for k, v := range s.data.DeviceSettings {
+		cp[k] = v
+	}
+	return cp
+}
+
+func (s *JSONStore) UpdateDeviceSettings(settings map[string]any) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.data.DeviceSettings = settings
+	return s.save()
+}
+
+func (s *JSONStore) CreateProject(project models.Project) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// check if ID already exists
+	for _, p := range s.data.Projects {
+		if p.ID == project.ID {
+			return errors.New("project ID already exists")
+		}
+	}
+
+	project.CreatedAt = time.Now()
+	project.UpdatedAt = time.Now()
+	s.data.Projects = append(s.data.Projects, project)
+	return s.save()
+}
+
+func (s *JSONStore) ListProjects() []models.Project {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	projects := make([]models.Project, len(s.data.Projects))
+	copy(projects, s.data.Projects)
+	return projects
+}
+
+func (s *JSONStore) GetProject(id string) (models.Project, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for _, p := range s.data.Projects {
+		if p.ID == id {
+			return p, true
+		}
+	}
+	return models.Project{}, false
+}
+
+func (s *JSONStore) UpdateProject(project models.Project) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for i, p := range s.data.Projects {
+		if p.ID == project.ID {
+			project.CreatedAt = p.CreatedAt
+			project.UpdatedAt = time.Now()
+			s.data.Projects[i] = project
+			return s.save()
+		}
+	}
+	return errors.New("project not found")
+}
+
+func (s *JSONStore) DeleteProject(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for i, p := range s.data.Projects {
+		if p.ID == id {
+			s.data.Projects = append(s.data.Projects[:i], s.data.Projects[i+1:]...)
+			return s.save()
+		}
+	}
+	return errors.New("project not found")
+}
+
+func (s *JSONStore) ListSubscriptions() []models.Subscription {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	subs := make([]models.Subscription, len(s.data.Subscriptions))
+	copy(subs, s.data.Subscriptions)
+	return subs
+}
+
+func (s *JSONStore) UpsertSubscription(sub models.Subscription) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for i, p := range s.data.Subscriptions {
+		if p.ID == sub.ID {
+			s.data.Subscriptions[i] = sub
+			return s.save()
+		}
+	}
+	s.data.Subscriptions = append(s.data.Subscriptions, sub)
+	return s.save()
+}
+
+func (s *JSONStore) DeleteSubscription(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for i, p := range s.data.Subscriptions {
+		if p.ID == id {
+			s.data.Subscriptions = append(s.data.Subscriptions[:i], s.data.Subscriptions[i+1:]...)
+			return s.save()
+		}
+	}
+	return errors.New("subscription not found")
+}
+
+func (s *JSONStore) ListFramesGif() []models.FrameGif {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	frames := make([]models.FrameGif, len(s.data.FramesGif))
+	copy(frames, s.data.FramesGif)
+	return frames
+}
+
+func (s *JSONStore) UpsertFrameGif(frame models.FrameGif) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for i, f := range s.data.FramesGif {
+		if f.ID == frame.ID {
+			s.data.FramesGif[i] = frame
+			return s.save()
+		}
+	}
+	s.data.FramesGif = append(s.data.FramesGif, frame)
+	return s.save()
+}
+
+func (s *JSONStore) DeleteFrameGif(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for i, f := range s.data.FramesGif {
+		if f.ID == id {
+			s.data.FramesGif = append(s.data.FramesGif[:i], s.data.FramesGif[i+1:]...)
+			return s.save()
+		}
+	}
+	return errors.New("frame gif not found")
+}
+
+func (s *JSONStore) GetPaymentKey() models.PaymentKey {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.data.PaymentKey
+}
+
+func (s *JSONStore) SavePaymentKey(key models.PaymentKey) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.data.PaymentKey = key
+	return s.save()
 }

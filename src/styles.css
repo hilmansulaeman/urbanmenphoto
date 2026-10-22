@@ -1,3 +1,5 @@
+@import "tailwindcss";
+
 :root {
   color: #17202a;
   background: #f7f4ef;
@@ -991,6 +993,12 @@ button {
   }
 }
 
+.admin-sidebar-icon svg {
+  width: 14px !important;
+  height: 14px !important;
+  stroke-width: 2.1;
+}
+
 @media (max-width: 480px) {
   .hero-content h1 {
     font-size: clamp(4rem, 24vw, 6.4rem);
@@ -1752,3 +1760,32 @@ button {
 @keyframes pulse { 0% { transform: scale(1); opacity: 1; } 50% { transform: scale(1.02); opacity: 0.9; } 100% { transform: scale(1); opacity: 1; } }
 
 @keyframes progressFill { 0% { width: 0%; } 100% { width: 95%; } }
+
+/* The admin dashboard follows the Figma desktop canvas but remains usable on kiosk tablets. */
+@media (max-width: 760px) {
+  .admin-layout {
+    display: block;
+  }
+
+  .admin-sidebar {
+    width: 100%;
+    max-height: 154px;
+  }
+
+  .admin-sidebar nav {
+    display: flex;
+    gap: 0.35rem;
+    overflow-x: auto;
+    padding: 0.65rem 0.75rem;
+  }
+
+  .admin-sidebar nav button {
+    width: auto !important;
+    flex: 0 0 auto;
+    margin-bottom: 0 !important;
+  }
+
+  .admin-sidebar > div:last-child {
+    display: none;
+  }
+}

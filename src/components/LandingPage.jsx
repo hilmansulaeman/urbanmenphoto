@@ -1,4 +1,6 @@
-import React from 'react';
+import React, { useState } from 'react';
+import DeviceSetupModal from './DeviceSetupModal.jsx';
+import { Settings } from 'lucide-react';
 
 const icons = {
   pointer: (
@@ -52,8 +54,46 @@ const bottomSteps = [
 ];
 
 export default function LandingPage({ onStart }) {
+  const [showDeviceSetup, setShowDeviceSetup] = useState(false);
+  const [pinInput, setPinInput] = useState('');
+  const [showPinPrompt, setShowPinPrompt] = useState(false);
+
+  const handleOpenSettings = () => {
+    setShowPinPrompt(true);
+  };
+
+  const handlePinSubmit = (e) => {
+    e.preventDefault();
+    const storedPin = JSON.parse(localStorage.getItem('potobox_kiosk_settings') || '{}').lockFullscreenPin || '000000';
+    if (pinInput === storedPin || storedPin === '') {
+      setShowDeviceSetup(true);
+      setShowPinPrompt(false);
+      setPinInput('');
+    } else {
+      alert('PIN Salah!');
+    }
+  };
   return (
     <main className="landing-new">
+      <button onClick={handleOpenSettings} style={{ position: 'fixed', top: '1.5rem', right: '1.5rem', background: 'rgba(0,0,0,0.1)', border: 'none', borderRadius: '50%', width: '48px', height: '48px', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', color: '#333', zIndex: 9998, boxShadow: '0 2px 5px rgba(0,0,0,0.2)' }}>
+        <Settings size={24} />
+      </button>
+
+      {showPinPrompt && (
+        <div style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, background: 'rgba(0,0,0,0.8)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 999 }}>
+          <form onSubmit={handlePinSubmit} style={{ background: 'white', padding: '2rem', borderRadius: '12px', textAlign: 'center' }}>
+            <h3 style={{ marginBottom: '1rem', color: 'black' }}>Masukkan PIN</h3>
+            <input type="password" value={pinInput} onChange={e => setPinInput(e.target.value)} style={{ fontSize: '1.5rem', padding: '0.5rem', textAlign: 'center', width: '200px', letterSpacing: '0.2em', border: '2px solid #ccc', borderRadius: '8px' }} autoFocus />
+            <div style={{ marginTop: '1.5rem', display: 'flex', gap: '1rem', justifyContent: 'center' }}>
+              <button type="button" onClick={() => setShowPinPrompt(false)} style={{ padding: '0.5rem 1rem', border: '1px solid #ccc', borderRadius: '6px', cursor: 'pointer' }}>Batal</button>
+              <button type="submit" style={{ padding: '0.5rem 1rem', background: '#0066ff', color: 'white', border: 'none', borderRadius: '6px', cursor: 'pointer' }}>Masuk</button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      {showDeviceSetup && <DeviceSetupModal onClose={() => setShowDeviceSetup(false)} />}
+
       <section className="how-it-works-section">
         <div className="how-it-works-header">
           <h2>CARA KERJA</h2>
