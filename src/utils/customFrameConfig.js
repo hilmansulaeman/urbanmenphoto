@@ -1,4 +1,3 @@
-import { supabase } from './supabaseClient';
 import { backendRequest } from './backendApi.js';
 
 export const DEFAULT_FRAME_WIDTH = 1080;
