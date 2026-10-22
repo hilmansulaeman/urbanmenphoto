@@ -701,20 +701,22 @@ func (a *agent) handlePrints(w http.ResponseWriter, r *http.Request) {
 	}
 	tmpFile.Close()
 
-	// Build PowerShell script for silent printing
+	// Build PowerShell script for silent printing. Single quotes are doubled
+	// so values stay inside their PowerShell string literals.
+	psQuote := func(value string) string { return strings.ReplaceAll(value, "'", "''") }
 	psScript := fmt.Sprintf(`
 Add-Type -AssemblyName System.Drawing
 $doc = New-Object System.Drawing.Printing.PrintDocument
-$doc.PrinterSettings.PrinterName = '%%s'
-$doc.PrinterSettings.Copies = %%d
+$doc.PrinterSettings.PrinterName = '%s'
+$doc.PrinterSettings.Copies = %d
 $doc.add_PrintPage({
     param($sender, $e)
-    $img = [System.Drawing.Image]::FromFile('%%s')
+    $img = [System.Drawing.Image]::FromFile('%s')
     $e.Graphics.DrawImage($img, $e.PageBounds)
     $img.Dispose()
 })
 $doc.Print()
-`, req.PrinterName, req.Copies, tmpFile.Name())
+`, psQuote(req.PrinterName), req.Copies, psQuote(tmpFile.Name()))
 
 	cmd := exec.Command("powershell", "-NoProfile", "-Command", psScript)
 	if out, err := cmd.CombinedOutput(); err != nil {

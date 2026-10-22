@@ -177,6 +177,11 @@ func (s *Server) allowedOrigin(origin string) bool {
 	if origin == "" {
 		return true
 	}
+	// The packaged Tauri kiosk loads the UI from its own webview origin
+	// (tauri://localhost on macOS, http://tauri.localhost on Windows).
+	if origin == "tauri://localhost" || origin == "http://tauri.localhost" {
+		return true
+	}
 	if len(s.cfg.AllowedOrigins) == 0 {
 		return strings.HasPrefix(origin, "http://localhost:") || strings.HasPrefix(origin, "http://127.0.0.1:")
 	}
