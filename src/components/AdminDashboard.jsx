@@ -2,7 +2,6 @@ import { useState, useEffect, useRef } from 'react';
 import PaymentView from './PaymentView';
 import WalletTab from './WalletTab';
 import FrameManager from './FrameManager';
-import FrameGifManager from './FrameGifManager';
 import SubscriptionTab from './SubscriptionTab';
 import PaymentKeyTab from './PaymentKeyTab';
 import { getKioskSettings, getPublicGalleryBaseUrl, normalizeCameraProfiles, defaultSettings as defaultKioskSettings } from '../utils/kioskConfig.js';
@@ -4195,7 +4194,7 @@ export default function AdminDashboard() {
         return <SubscriptionTab adminToken={adminToken} />;
 
       case 'frame_gif':
-        return <FrameGifManager adminToken={adminToken} />;
+        return <FrameManager key="gif" adminToken={adminToken} kind="gif" />;
 
       case 'payment_key':
         return <PaymentKeyTab adminToken={adminToken} />;
@@ -4273,7 +4272,7 @@ export default function AdminDashboard() {
         );
         
       case 'frame_photo':
-        return <FrameManager adminToken={adminToken} />;
+        return <FrameManager key="photo" adminToken={adminToken} kind="photo" />;
 
       case 'voucher':
         return <VoucherSettingsTab adminToken={adminToken} />;

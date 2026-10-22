@@ -48,7 +48,10 @@ function FrameOptionsModal({ frame, onClose, onToggleActive, onDelete }) {
   );
 }
 
-export default function FrameManager({ adminToken }) {
+// kind 'photo' manages /api/admin/frames; kind 'gif' manages /api/admin/frames_gif.
+export default function FrameManager({ adminToken, kind = 'photo' }) {
+  const isGif = kind === 'gif';
+  const framesApi = isGif ? '/api/admin/frames_gif' : '/api/admin/frames';
 
   // Data
   const [frames, setFrames] = useState([]);
@@ -63,7 +66,7 @@ export default function FrameManager({ adminToken }) {
   // Load frames
   const loadFrames = async () => {
     try {
-      const backendFrames = await backendRequest('/api/admin/frames', adminToken);
+      const backendFrames = await backendRequest(framesApi, adminToken);
       const framesArray = Array.isArray(backendFrames) ? backendFrames : [];
       const mappedFrames = framesArray.map(f => {
         let slots = [];
@@ -130,14 +133,14 @@ export default function FrameManager({ adminToken }) {
         slotJson: JSON.stringify(slots)
       };
 
-      await backendRequest('/api/admin/frames', adminToken, {
+      await backendRequest(framesApi, adminToken, {
         method: 'POST',
         body: JSON.stringify(payload)
       });
       loadFrames();
       setShowCreateModal(false);
     } catch (e) {
-      alert('Gagal membuat bingkai kosong: ' + e.message);
+      alert(`Gagal membuat bingkai ${isGif ? 'GIF ' : ''}kosong: ` + e.message);
     }
   };
 
@@ -150,7 +153,7 @@ export default function FrameManager({ adminToken }) {
       delete payload.disabled;
 
       const rawId = frame.id.replace(/^custom_/, '');
-      await backendRequest(`/api/admin/frames/${rawId}`, adminToken, {
+      await backendRequest(`${framesApi}/${rawId}`, adminToken, {
         method: 'PUT',
         body: JSON.stringify(payload)
       });
@@ -164,7 +167,7 @@ export default function FrameManager({ adminToken }) {
   const handleDeleteFrame = async (id) => {
     try {
       const rawId = id.replace(/^custom_/, '');
-      await backendRequest(`/api/admin/frames/${rawId}`, adminToken, {
+      await backendRequest(`${framesApi}/${rawId}`, adminToken, {
         method: 'DELETE'
       });
       loadFrames();
@@ -183,7 +186,7 @@ export default function FrameManager({ adminToken }) {
       {/* Header */}
       <div className="flex justify-between items-center mb-6">
         <div>
-          <h2 className="text-2xl font-bold text-gray-900 m-0">Manajemen Bingkai</h2>
+          <h2 className="text-2xl font-bold text-gray-900 m-0">{isGif ? 'Manajemen Bingkai GIF' : 'Manajemen Bingkai'}</h2>
           <p className="text-gray-500 text-sm mt-1">Buat dan kelola bingkai photobooth Anda</p>
         </div>
         <button
@@ -387,6 +390,7 @@ export default function FrameManager({ adminToken }) {
       {showAssetModal && (
         <AddAssetModal
           adminToken={adminToken}
+          framesApi={framesApi}
           onClose={() => setShowAssetModal(false)}
           onAssetSelected={async ({ assetUrl, detectedSlots }) => {
             setShowAssetModal(false);
@@ -409,7 +413,7 @@ export default function FrameManager({ adminToken }) {
                 slotJson: JSON.stringify(payloadSlots)
               };
 
-              await backendRequest('/api/admin/frames', adminToken, {
+              await backendRequest(framesApi, adminToken, {
                 method: 'POST',
                 body: JSON.stringify(payload)
               });
@@ -585,7 +589,7 @@ function CreateFrameModal({ onClose, onOpenAsset, onSelectBlank }) {
 // ==============================================
 // ADD ASSET MODAL
 // ==============================================
-function AddAssetModal({ onClose, onAssetSelected, adminToken }) {
+function AddAssetModal({ onClose, onAssetSelected, adminToken, framesApi }) {
   const [assets, setAssets] = useState([]);
   const [isUploading, setIsUploading] = useState(false);
   const [imageUrl, setImageUrl] = useState('');
@@ -594,10 +598,10 @@ function AddAssetModal({ onClose, onAssetSelected, adminToken }) {
   const fileInputRef = useRef(null);
 
   useEffect(() => {
-    backendRequest('/api/admin/frames', adminToken).then(res => {
+    backendRequest(framesApi, adminToken).then(res => {
       setAssets(res.data || []);
     }).catch(e => console.error(e));
-  }, [adminToken]);
+  }, [adminToken, framesApi]);
 
   const handleUpload = async (file) => {
     if (!file) return;
@@ -726,7 +730,7 @@ function AddAssetModal({ onClose, onAssetSelected, adminToken }) {
       const formData = new FormData();
       formData.append('file', processedResult.blob, file.name.replace(/\.[^/.]+$/, "") + "_transparent.png");
 
-      const res = await fetch(`${getBackendApiUrl()}/api/admin/frames/upload`, {
+      const res = await fetch(`${getBackendApiUrl()}${framesApi}/upload`, {
         method: 'POST',
         headers: { 'Authorization': `Bearer ${adminToken}` },
         body: formData
