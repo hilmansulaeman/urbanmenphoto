@@ -26,3 +26,6 @@ backend/dist/
 backend/release/
 *.exe
 .wrangler/
+
+# Canon EDSDK is proprietary and cannot be redistributed
+backend/cmd/camera-agent/sdk/

@@ -3,6 +3,7 @@ module urbanmenphoto/backend
 go 1.25.0
 
 require (
+	github.com/ebitengine/purego v0.11.2
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/midtrans/midtrans-go v1.3.8
 	golang.org/x/oauth2 v0.36.0

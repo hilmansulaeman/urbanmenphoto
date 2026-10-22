@@ -16,6 +16,16 @@ Section "Camera Agent" SecMain
   File "../../backend/dist/camera-agent.exe"
   File /oname=README-WINDOWS.txt "../../backend/cmd/camera-agent/README-WINDOWS.txt"
 
+  ; Canon EDSDK (CAMERA_PROVIDER=edsdk) is licensed by Canon and not in git.
+  ; Copy EDSDK.dll and EdsImage.dll to backend/cmd/camera-agent/sdk/windows-x64
+  ; before building to bundle them.
+  !if /fileexists "../../backend/cmd/camera-agent/sdk/windows-x64/EDSDK.dll"
+    SetOutPath "$INSTDIR\edsdk"
+    File "../../backend/cmd/camera-agent/sdk/windows-x64/EDSDK.dll"
+    File "../../backend/cmd/camera-agent/sdk/windows-x64/EdsImage.dll"
+    SetOutPath "$INSTDIR"
+  !endif
+
   IfFileExists "$INSTDIR\camera-agent.env" config_exists
   File /oname=camera-agent.env "../../backend/dist/camera-agent.env.example"
 config_exists:
@@ -32,6 +42,7 @@ Section "Uninstall"
   RMDir "$SMPROGRAMS\Urbanmen Photo"
   Delete "$DESKTOP\Urbanmen Photo Camera Agent.lnk"
   Delete "$INSTDIR\camera-agent.exe"
+  RMDir /r "$INSTDIR\edsdk"
   Delete "$INSTDIR\README-WINDOWS.txt"
   Delete "$INSTDIR\uninstall.exe"
   ; Keep camera-agent.env so reinstalling does not erase the user's secrets.

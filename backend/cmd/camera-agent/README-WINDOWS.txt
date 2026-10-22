@@ -1,6 +1,20 @@
 URBANMEN PHOTO - CAMERA AGENT FOR WINDOWS
 
-PHASE 1 - ONE CANON CAMERA VIA ZADIG / WINUSB
+OPTION A - CANON EDSDK (RECOMMENDED, NO ZADIG, NO GPHOTO2)
+
+1. Get the Canon EDSDK from Canon (license required; do not commit it).
+2. Copy Windows/EDSDK_64/Dll/EDSDK.dll and EdsImage.dll (64-bit) into an
+   "edsdk" folder next to camera-agent.exe, or set EDSDK_DIR in
+   camera-agent.env. The installer bundles them from
+   backend/cmd/camera-agent/sdk/windows-x64 when present at build time.
+3. Set CAMERA_PROVIDER=edsdk in camera-agent.env. Use the normal Canon USB
+   driver (not Zadig/WinUSB). Close EOS Utility and every Canon application.
+4. Start the agent and open http://127.0.0.1:8787/api/cameras. Each camera
+   appears as canon:<serial>, a permanent ID that survives replugging.
+Cameras must be in a still-photo mode (M/Av/Tv/P), not movie mode.
+
+OPTION B - ONE CANON CAMERA VIA ZADIG / WINUSB (gphoto2)
+
 
 1. Connect one powered-on Canon DSLR in photo mode with a data USB cable.
 2. Use Zadig to install WinUSB for that exact camera. Close Dreambooth,

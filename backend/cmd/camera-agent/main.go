@@ -71,6 +71,12 @@ type localCapture struct {
 
 var gphotoMu sync.Mutex
 
+func init() {
+	// EDSDK must run on the main OS thread (macOS requires it); main then
+	// hands this thread to edsdkDriver.run.
+	runtime.LockOSThread()
+}
+
 func main() {
 	cfg, err := loadConfig()
 	if err != nil {
@@ -82,7 +88,7 @@ func main() {
 			log.Fatalf("gphoto2 tidak ditemukan (%s). Install MSYS2 gphoto2 atau isi GPHOTO2_PATH: %v", cfg.GPhotoPath, err)
 		}
 	}
-	if cfg.Provider != "gphoto2" && cfg.Provider != "digicamcontrol" {
+	if cfg.Provider != "gphoto2" && cfg.Provider != "digicamcontrol" && cfg.Provider != "edsdk" {
 		log.Fatalf("CAMERA_PROVIDER tidak valid: %s", cfg.Provider)
 	}
 	if cfg.StorageMode == "supabase" && (cfg.SupabaseURL == "" || cfg.SupabaseServiceKey == "") {
@@ -90,20 +96,56 @@ func main() {
 	}
 
 	agent := &agent{cfg: cfg, client: &http.Client{Timeout: 45 * time.Second}}
+	if cfg.Provider == "edsdk" {
+		lib, dir, err := loadEDSDK()
+		if err != nil {
+			log.Fatal(err)
+		}
+		log.Printf("EDSDK dimuat dari %s", dir)
+		agent.eds = newEDSDKDriver(lib)
+	}
 	server := &http.Server{
 		Addr:              cfg.Listen,
 		Handler:           agent.withCORS(agent.routes()),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	log.Printf("Camera Agent berjalan di http://%s", cfg.Listen)
+	if agent.eds != nil {
+		go func() {
+			if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				log.Fatal(err)
+			}
+		}()
+		log.Fatal(agent.eds.run())
+	}
 	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatal(err)
 	}
 }
 
+// loadEDSDK tries every known SDK location and reports all failures if none works.
+func loadEDSDK() (*edsLib, string, error) {
+	var failures []string
+	for _, dir := range edsdkSearchDirs() {
+		if _, err := os.Stat(filepath.Join(dir, edsdkLibraryName)); err != nil {
+			continue
+		}
+		lib, err := loadEDSLib(dir)
+		if err == nil {
+			return lib, dir, nil
+		}
+		failures = append(failures, err.Error())
+	}
+	if len(failures) > 0 {
+		return nil, "", errors.New(strings.Join(failures, "; "))
+	}
+	return nil, "", fmt.Errorf("%s tidak ditemukan. Salin Canon EDSDK ke folder sdk/ atau isi EDSDK_DIR", edsdkLibraryName)
+}
+
 type agent struct {
 	cfg    config
 	client *http.Client
+	eds    *edsdkDriver
 }
 
 func (a *agent) routes() http.Handler {
@@ -228,6 +270,9 @@ func (a *agent) handleLocalCapture(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *agent) detect(parent context.Context) ([]camera, error) {
+	if a.cfg.Provider == "edsdk" {
+		return a.eds.list(parent)
+	}
 	if a.cfg.Provider == "digicamcontrol" {
 		return a.detectDigiCamControl(parent)
 	}
@@ -237,6 +282,9 @@ func (a *agent) detect(parent context.Context) ([]camera, error) {
 func (a *agent) validCameraID(port string) bool {
 	if a.cfg.Provider == "digicamcontrol" {
 		return strings.HasPrefix(port, "dcc:")
+	}
+	if a.cfg.Provider == "edsdk" {
+		return strings.HasPrefix(port, "edsdk:") || strings.HasPrefix(port, "canon:")
 	}
 	return isUSBPort(port) || strings.HasPrefix(port, "canon:")
 }
@@ -334,18 +382,21 @@ func (a *agent) capture(parent context.Context, port, baseURL string) (string, e
 }
 
 func (a *agent) captureLocal(parent context.Context, port, baseURL string) (localCapture, error) {
-	if a.cfg.Provider != "gphoto2" {
-		return localCapture{}, errors.New("mode local hanya tersedia untuk CAMERA_PROVIDER=gphoto2")
+	if a.cfg.Provider != "gphoto2" && a.cfg.Provider != "edsdk" {
+		return localCapture{}, errors.New("mode local hanya tersedia untuk CAMERA_PROVIDER=gphoto2 atau edsdk")
 	}
 	if strings.ContainsAny(port, "\r\n") || !a.validCameraID(port) {
 		return localCapture{}, errors.New("DSLR port is invalid")
 	}
-	usbPort, err := a.resolveGPhotoPort(parent, port)
-	if err != nil {
-		return localCapture{}, err
+	usbPort := port
+	if a.cfg.Provider == "gphoto2" {
+		var err error
+		if usbPort, err = a.resolveGPhotoPort(parent, port); err != nil {
+			return localCapture{}, err
+		}
+		gphotoMu.Lock()
+		defer gphotoMu.Unlock()
 	}
-	gphotoMu.Lock()
-	defer gphotoMu.Unlock()
 	if err := os.MkdirAll(a.cfg.CaptureDirectory, 0755); err != nil {
 		return localCapture{}, fmt.Errorf("prepare capture directory: %w", err)
 	}
@@ -354,8 +405,11 @@ func (a *agent) captureLocal(parent context.Context, port, baseURL string) (loca
 	path := filepath.Join(a.cfg.CaptureDirectory, name)
 	ctx, cancel := context.WithTimeout(parent, 45*time.Second)
 	defer cancel()
-	output, err := exec.CommandContext(ctx, a.cfg.GPhotoPath, "--port", usbPort, "--capture-image-and-download", "--force-overwrite", "--filename", path).CombinedOutput()
-	if err != nil {
+	if a.cfg.Provider == "edsdk" {
+		if err := a.eds.capture(ctx, usbPort, path); err != nil {
+			return localCapture{}, err
+		}
+	} else if output, err := exec.CommandContext(ctx, a.cfg.GPhotoPath, "--port", usbPort, "--capture-image-and-download", "--force-overwrite", "--filename", path).CombinedOutput(); err != nil {
 		return localCapture{}, gphotoError(err, output)
 	}
 	info, err := os.Stat(path)

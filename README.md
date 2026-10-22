@@ -34,6 +34,16 @@ SUPABASE_BUCKET=potobox-galleries
 
 `SUPABASE_SERVICE_ROLE_KEY` hanya untuk backend lokal dan tidak boleh memakai prefix `VITE_` atau dimasukkan ke Vercel. Saat variabel tidak diisi, backend tetap memakai folder lokal sebagai fallback.
 
+### Canon EDSDK (provider `edsdk`)
+
+Camera Agent dapat memakai Canon EDSDK resmi dengan `CAMERA_PROVIDER=edsdk` di Windows, macOS, dan Linux, tanpa Zadig dan tanpa gphoto2. SDK bersifat proprietary sehingga tidak ikut di git. Salin file dari paket Canon ke folder yang di-ignore:
+
+- Windows: `EDSDK_64/Dll/EDSDK.dll` dan `EdsImage.dll` ke `backend/cmd/camera-agent/sdk/windows-x64/`
+- macOS: `EDSDK.framework` dari `Macintosh.dmg` ke `backend/cmd/camera-agent/sdk/macos/` (gunakan `ditto`, lalu `xattr -dr com.apple.quarantine`)
+- Linux: `libEDSDK.so` ke `sdk/linux-x86_64/` atau `sdk/linux-arm64/`
+
+Atau isi `EDSDK_DIR` dengan folder SDK. Jalankan `cd backend && go run ./cmd/camera-agent` dengan `CAMERA_PROVIDER=edsdk`, lalu buka `http://127.0.0.1:8787/api/cameras`. Kamera tampil sebagai `canon:<serial>`. Backend Go memakainya lewat `HARDWARE_AGENT_URL`.
+
 ### Camera Agent untuk Windows (fase 1)
 
 Untuk booth Canon dengan driver **WinUSB dari Zadig**, jalankan `camera-agent.exe` di PC Windows yang tersambung langsung ke DSLR. Agent menggunakan `gphoto2`/libgphoto2 dan menyediakan `GET /api/cameras` serta `POST /api/cameras/{id}/capture` secara lokal pada `127.0.0.1:8787`.
