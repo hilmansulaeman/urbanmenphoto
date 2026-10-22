@@ -1,10 +1,10 @@
 # Potobox
 
-Potobox adalah web photobooth frontend berbasis React + Vite. Aplikasi berjalan sepenuhnya di browser untuk mengambil foto dari kamera, memilih filter, memilih frame, membuat card 1/4/6 foto, dan mengunduh hasil sebagai PNG.
+Potobox adalah web photobooth berbasis React + Vite dengan satu backend Go (`backend/`). Frontend mengambil foto dari kamera, memilih filter dan frame, membuat card 1/4/6 foto, dan mengunduh hasil sebagai PNG. Backend Go mengurus sesi, pembayaran, galeri, voucher, admin, DSLR, dan printer.
 
 ## DSLR tethering (Canon USB)
 
-## Kiosk App Windows (Electron + WebUSB)
+## Kiosk App Windows (Tauri + WebUSB)
 
 `npm run desktop:dist` membuat installer Windows **Urbanmen Photo Kiosk**. Aplikasi ini menjalankan sesi customer dalam jendela fullscreen dan memuat deployment staging Urbanmen Photo, sehingga API web tidak diarahkan ke `file://` atau backend lokal yang tidak aktif. Kamera direct WebUSB membutuhkan driver WinUSB dari Zadig; printer tetap memakai driver resmi Windows.
 
@@ -58,7 +58,7 @@ pacman -S mingw-w64-ucrt-x86_64-gphoto2
 gphoto2 --auto-detect
 ```
 
-Untuk instalasi booth lokal, gunakan `hardware-agent/` berbasis .NET. Jalankan Hardware Agent di mini PC pada `127.0.0.1:8790`, lalu set `HARDWARE_AGENT_URL=http://127.0.0.1:8790` pada backend Go. Browser kiosk cukup membuka `http://localhost:8787`; tidak ada URL Camera Agent atau Cloudflare Tunnel yang perlu diisi.
+Untuk instalasi booth lokal, Hardware Agent (.NET, dikelola terpisah) dapat dipakai. Jalankan Hardware Agent di mini PC pada `127.0.0.1:8790`, lalu set `HARDWARE_AGENT_URL=http://127.0.0.1:8790` pada backend Go. Browser kiosk cukup membuka `http://localhost:8787`; tidak ada URL Camera Agent atau Cloudflare Tunnel yang perlu diisi.
 
 ## Fitur
 
@@ -69,7 +69,7 @@ Untuk instalasi booth lokal, gunakan `hardware-agent/` berbasis .NET. Jalankan H
 - Frame photobooth modern, birthday, wedding, retro, fun, dan holiday.
 - Download hasil PNG di sisi client.
 - Modal support Saweria sebelum download.
-- Tanpa backend, database, login, atau upload server.
+- Backend tunggal: Go (`backend/`) dengan PostgreSQL atau JSON store lokal, dan Supabase Storage opsional.
 
 ## Development
 
